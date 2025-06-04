@@ -4,6 +4,10 @@ from bet_calculator import evaluar_prop_bet
 from bet_scraper import BetScraper
 import pandas as pd
 
+# Inicializar el historial de apuestas en la sesión si no existe
+if 'historial_apuestas' not in st.session_state:
+    st.session_state.historial_apuestas = []
+
 # Configuración de la página
 st.set_page_config(
     page_title="NBA Stats Dashboard",
@@ -313,8 +317,62 @@ if equipo_sel:
                             )
                             st.markdown("### 📊 Resultado del Análisis")
                             st.code(resultado, language="markdown")
+                            
+                            # Extraer el valor esperado del resultado
+                            import re
+                            valor_esperado = None
+                            for linea in resultado.split('\n'):
+                                if 'Valor esperado por unidad apostada:' in linea:
+                                    valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                    break
+                            
+                            # Agregar al historial
+                            nueva_apuesta = {
+                                'jugador': jugador_sel,
+                                'tipo': tipo_prop,
+                                'linea': f"{'>' if tipo_apuesta == 'Más de' else '<'}{umbral}",
+                                'cuota': cuota,
+                                'valor_esperado': valor_esperado,
+                                'recomendacion': '✅' if valor_esperado > 0 else '❌'
+                            }
+                            st.session_state.historial_apuestas.append(nueva_apuesta)
+                            
                         except Exception as e:
                             st.error(f"❌ Error al analizar la apuesta: {str(e)}")
+                            
+                # Mostrar historial de apuestas
+                if st.session_state.historial_apuestas:
+                    st.markdown("---")
+                    st.header("📚 Historial de Apuestas Analizadas")
+                    
+                    # Crear DataFrame del historial
+                    df_historial = pd.DataFrame(st.session_state.historial_apuestas)
+                    
+                    # Ordenar por valor esperado (mejor a peor)
+                    df_historial = df_historial.sort_values('valor_esperado', ascending=False)
+                    
+                    # Formatear el valor esperado
+                    df_historial['valor_esperado'] = df_historial['valor_esperado'].apply(lambda x: f"{x:+.2f}" if x is not None else "N/A")
+                    
+                    # Mostrar tabla con estilo
+                    st.dataframe(
+                        df_historial,
+                        column_config={
+                            "jugador": st.column_config.TextColumn("Jugador", width="medium"),
+                            "tipo": st.column_config.TextColumn("Tipo", width="medium"),
+                            "linea": st.column_config.TextColumn("Línea", width="small"),
+                            "cuota": st.column_config.NumberColumn("Cuota", format="%.2f"),
+                            "valor_esperado": st.column_config.TextColumn("Valor Esperado", width="small"),
+                            "recomendacion": st.column_config.TextColumn("Rec.", width="small")
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                    
+                    # Botón para limpiar historial
+                    if st.button("🗑️ Limpiar Historial"):
+                        st.session_state.historial_apuestas = []
+                        st.rerun()
             else:
                 st.error("❌ No se encontró la columna PLAYER_NAME en los datos")
     except Exception as e:
