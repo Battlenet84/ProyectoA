@@ -5,26 +5,55 @@ Módulo para manejar la obtención y visualización de datos de la NBA.
 import requests
 import pandas as pd
 from typing import Dict, Optional, List
+from datetime import datetime
 
 
 class NBAStats:
+    # Constantes para tipos de temporada
+    REGULAR_SEASON = "Regular Season"
+    PLAYOFFS = "Playoffs"
+    PRE_SEASON = "Pre Season"
+    ALL_STAR = "All Star"
+    
+    # Lista de temporadas disponibles (últimos 5 años)
+    TEMPORADAS = [
+        "2024-25",
+        "2023-24",
+        "2022-23",
+        "2021-22",
+        "2020-21",
+        "2019-20"
+    ]
+    
+    # Tipos de temporada disponibles
+    TIPOS_TEMPORADA = [
+        REGULAR_SEASON,
+        PLAYOFFS,
+        PRE_SEASON,
+        ALL_STAR
+    ]
+    
     def __init__(self):
         self.base_url = "https://stats.nba.com/stats/"
-        self.current_season = "2024-25"
+        # Obtener la temporada actual basada en la fecha
+        self.current_season = self._get_current_season()
         self.headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Host": "stats.nba.com",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
             "Connection": "keep-alive",
-            "Referer": "https://www.nba.com/",
-            "x-nba-stats-origin": "stats",
-            "x-nba-stats-token": "true",
+            "Host": "stats.nba.com",
             "Origin": "https://www.nba.com",
+            "Referer": "https://www.nba.com/",
+            "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site"
+            "Sec-Fetch-Site": "same-site",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "x-nba-stats-origin": "stats",
+            "x-nba-stats-token": "true"
         }
         
         # Diccionario de equipos NBA
@@ -45,15 +74,32 @@ class NBAStats:
             "SAS": "San Antonio Spurs", "TOR": "Toronto Raptors",
             "UTA": "Utah Jazz", "WAS": "Washington Wizards"
         }
+        print("NBA Stats inicializado con headers actualizados")
 
-    def get_player_stats(self, season_type: str = "Regular Season", vs_team_id: str = None) -> pd.DataFrame:
+    def _get_current_season(self) -> str:
+        """Determina la temporada actual basada en la fecha."""
+        now = datetime.now()
+        year = now.year
+        month = now.month
+        
+        # Si estamos entre octubre y diciembre, la temporada es year-year+1
+        # Si estamos entre enero y septiembre, la temporada es year-1-year
+        if month >= 10:
+            return f"{year}-{str(year+1)[2:]}"
+        else:
+            return f"{year-1}-{str(year)[2:]}"
+
+    def get_player_stats(self, season: str = None, season_type: str = REGULAR_SEASON, vs_team_id: str = None) -> pd.DataFrame:
         """Obtiene estadísticas de jugadores."""
+        if season is None:
+            season = self.current_season
+            
         endpoint = "leaguedashplayerstats"
         params = {
             "MeasureType": "Base",
             "PerMode": "PerGame",
-            "Season": "2023-24",  # Temporada actual
-            "SeasonType": "Regular Season",
+            "Season": season,
+            "SeasonType": season_type,
             "DateFrom": "",
             "DateTo": "",
             "GameScope": "",
@@ -80,11 +126,7 @@ class NBAStats:
         }
         
         try:
-            print("\nObteniendo estadísticas de jugadores...")
-            print("Headers:", self.headers)
-            print("URL:", f"{self.base_url}{endpoint}")
-            print("Parámetros:", params)
-            
+            print(f"\nObteniendo estadísticas de jugadores para {season} ({season_type})...")
             response = requests.get(
                 f"{self.base_url}{endpoint}",
                 headers=self.headers,
@@ -92,50 +134,55 @@ class NBAStats:
                 timeout=30
             )
             
-            print(f"URL de la solicitud: {response.url}")
-            print(f"Código de estado: {response.status_code}")
-            print(f"Headers de respuesta: {response.headers}")
-            
             if response.status_code != 200:
                 print(f"Error en la respuesta: {response.text}")
                 return pd.DataFrame()
             
-            try:
-                data = response.json()
-                print("\nEstructura de datos recibida:")
-                print("Claves principales:", list(data.keys()))
-                if 'resultSets' in data:
-                    print("Número de conjuntos de resultados:", len(data['resultSets']))
-                    print("Estructura del primer conjunto:", list(data['resultSets'][0].keys()))
-            except Exception as e:
-                print(f"Error al decodificar JSON: {str(e)}")
-                print("Contenido de la respuesta:", response.text[:500])
-                return pd.DataFrame()
-            
+            data = response.json()
             if 'resultSets' not in data:
                 print("No se encontró la estructura esperada en los datos")
-                print("Claves disponibles:", list(data.keys()))
                 return pd.DataFrame()
             
-            try:
-                df = pd.DataFrame(
-                    data['resultSets'][0]['rowSet'],
-                    columns=data['resultSets'][0]['headers']
+            df = pd.DataFrame(
+                data['resultSets'][0]['rowSet'],
+                columns=data['resultSets'][0]['headers']
+            )
+            
+            # Asegurarnos de que tenemos la columna de nombres
+            if 'PLAYER_NAME' not in df.columns:
+                # Intentar obtener nombres de jugadores
+                endpoint_players = "commonallplayers"
+                params_players = {
+                    "LeagueID": "00",
+                    "Season": season,
+                    "IsOnlyCurrentSeason": "1"
+                }
+                
+                response_players = requests.get(
+                    f"{self.base_url}{endpoint_players}",
+                    headers=self.headers,
+                    params=params_players,
+                    timeout=30
                 )
-                print("\nDataFrame creado exitosamente")
-                print(f"Dimensiones: {df.shape}")
-                print("Primeras columnas:", list(df.columns)[:5])
-                print("Primeras filas:", df.head(2).to_string())
-            except Exception as e:
-                print(f"Error al crear DataFrame: {str(e)}")
-                print("Estructura de resultSets:", data['resultSets'][0].keys())
-                return pd.DataFrame()
+                
+                if response_players.status_code == 200:
+                    data_players = response_players.json()
+                    if 'resultSets' in data_players:
+                        df_players = pd.DataFrame(
+                            data_players['resultSets'][0]['rowSet'],
+                            columns=data_players['resultSets'][0]['headers']
+                        )
+                        # Crear diccionario de mapeo ID -> Nombre
+                        player_names = dict(zip(df_players['PERSON_ID'], df_players['DISPLAY_FIRST_LAST']))
+                        # Añadir columna de nombres
+                        df['PLAYER_NAME'] = df['PLAYER_ID'].map(player_names)
+            
+            # Agregar columnas de temporada y tipo
+            df['SEASON'] = season
+            df['SEASON_TYPE'] = season_type
             
             return self._process_player_stats(df)
             
-        except requests.exceptions.RequestException as e:
-            print(f"Error en la solicitud HTTP: {str(e)}")
-            return pd.DataFrame()
         except Exception as e:
             print(f"Error inesperado: {str(e)}")
             return pd.DataFrame()
@@ -220,7 +267,21 @@ class NBAStats:
         print("Columnas antes del procesamiento:", list(df.columns))
         print("Número de filas:", len(df))
         print("Muestra de datos:", df.head(1).to_string())
+
+        # Asegurarnos de que tenemos una columna de nombres
+        if 'PLAYER_NAME' not in df.columns:
+            if 'PLAYER' in df.columns:
+                df['PLAYER_NAME'] = df['PLAYER']
+            elif 'PLAYER_ID' in df.columns:
+                print("Solo tenemos IDs de jugadores, necesitamos obtener los nombres")
+                return df
         
+        # Asegurarnos de que los nombres sean strings
+        if 'PLAYER_NAME' in df.columns:
+            df['PLAYER_NAME'] = df['PLAYER_NAME'].astype(str)
+            # Limpiar nombres si es necesario
+            df['PLAYER_NAME'] = df['PLAYER_NAME'].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            
         return df
 
     def _process_team_stats(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -245,6 +306,14 @@ class NBAStats:
     def obtener_lista_equipos(self) -> List[str]:
         """Retorna la lista de equipos NBA ordenada alfabéticamente."""
         return sorted(list(self.equipos_nba.values()))
+
+    def obtener_lista_temporadas(self) -> List[str]:
+        """Retorna la lista de temporadas disponibles."""
+        return self.TEMPORADAS
+
+    def obtener_tipos_temporada(self) -> List[str]:
+        """Retorna la lista de tipos de temporada disponibles."""
+        return self.TIPOS_TEMPORADA
 
     def _get_team_id(self, team_name: str) -> str:
         """Obtiene el ID del equipo a partir de su nombre completo."""
@@ -283,19 +352,22 @@ class NBAStats:
         }
         return team_ids.get(team_name)
 
-    def obtener_estadisticas_equipo(self, equipo: str, rivales: Optional[List[str]] = None) -> pd.DataFrame:
+    def obtener_estadisticas_equipo(self, equipo: str, rivales: Optional[List[str]] = None, 
+                                temporada: Optional[str] = None, tipo_temporada: str = REGULAR_SEASON) -> pd.DataFrame:
         """
         Obtiene las estadísticas de un equipo específico, opcionalmente filtradas por rivales.
         
         Args:
             equipo: Nombre completo del equipo
             rivales: Lista opcional de nombres completos de equipos rivales
+            temporada: Temporada (ej: "2023-24")
+            tipo_temporada: Tipo de temporada (Regular Season, Playoffs, etc)
         """
         if rivales and len(rivales) == 1:
             rival_id = self._get_team_id(rivales[0])
-            df = self.get_team_stats(vs_team_id=rival_id)
+            df = self.get_team_stats(season=temporada, season_type=tipo_temporada, vs_team_id=rival_id)
         else:
-            df = self.get_team_stats()
+            df = self.get_team_stats(season=temporada, season_type=tipo_temporada)
             
         if df.empty:
             return df
@@ -319,19 +391,22 @@ class NBAStats:
         df_equipo = df[df[team_column] == equipo]
         return df_equipo
 
-    def obtener_estadisticas_jugadores_equipo(self, equipo: str, rivales: Optional[List[str]] = None) -> pd.DataFrame:
+    def obtener_estadisticas_jugadores_equipo(self, equipo: str, rivales: Optional[List[str]] = None,
+                                            temporada: Optional[str] = None, tipo_temporada: str = REGULAR_SEASON) -> pd.DataFrame:
         """
         Obtiene las estadísticas de los jugadores de un equipo específico.
         
         Args:
             equipo: Nombre completo del equipo
             rivales: Lista opcional de nombres completos de equipos rivales
+            temporada: Temporada (ej: "2023-24")
+            tipo_temporada: Tipo de temporada (Regular Season, Playoffs, etc)
         """
         if rivales and len(rivales) == 1:
             rival_id = self._get_team_id(rivales[0])
-            df = self.get_player_stats(vs_team_id=rival_id)
+            df = self.get_player_stats(season=temporada, season_type=tipo_temporada, vs_team_id=rival_id)
         else:
-            df = self.get_player_stats()
+            df = self.get_player_stats(season=temporada, season_type=tipo_temporada)
             
         if df.empty:
             print("No se obtuvieron datos de jugadores")
@@ -377,6 +452,99 @@ class NBAStats:
             print(f"No se encontraron jugadores para el equipo {equipo}")
             
         return df_jugadores
+
+    def get_player_game_logs(self, player_id: str, season: str = None, season_type: str = REGULAR_SEASON, vs_team_id: str = None) -> pd.DataFrame:
+        """Obtiene estadísticas partido a partido de un jugador específico."""
+        if season is None:
+            season = self.current_season
+            
+        endpoint = "playergamelog"
+        params = {
+            "DateFrom": "",
+            "DateTo": "",
+            "GameSegment": "",
+            "LastNGames": "0",
+            "LeagueID": "00",
+            "Location": "",
+            "MeasureType": "Base",
+            "Month": "0",
+            "OpponentTeamID": vs_team_id if vs_team_id else "0",
+            "Outcome": "",
+            "PORound": "0",
+            "Season": season,
+            "SeasonSegment": "",
+            "SeasonType": season_type,
+            "TeamID": "0",
+            "PlayerID": player_id,
+            "VsConference": "",
+            "VsDivision": ""
+        }
+        
+        try:
+            print(f"\nObteniendo logs de partidos para jugador {player_id} en {season} ({season_type})...")
+            response = requests.get(
+                f"{self.base_url}{endpoint}",
+                headers=self.headers,
+                params=params,
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f"Error en la respuesta: {response.text}")
+                return pd.DataFrame()
+            
+            data = response.json()
+            if 'resultSets' not in data:
+                print("No se encontró la estructura esperada en los datos")
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(
+                data['resultSets'][0]['rowSet'],
+                columns=data['resultSets'][0]['headers']
+            )
+            
+            # Agregar columnas de temporada y tipo
+            df['SEASON'] = season
+            df['SEASON_TYPE'] = season_type
+            
+            return df
+            
+        except Exception as e:
+            print(f"Error al obtener logs de partidos: {str(e)}")
+            return pd.DataFrame()
+
+    def obtener_estadisticas_jugador_por_partido(self, equipo: str, jugador: str) -> pd.DataFrame:
+        """
+        Obtiene las estadísticas partido a partido de un jugador específico.
+        
+        Args:
+            equipo: Nombre completo del equipo
+            jugador: Nombre del jugador
+        """
+        # Primero obtenemos el ID del equipo
+        team_id = self._get_team_id(equipo)
+        if not team_id:
+            print(f"No se encontró el ID para el equipo {equipo}")
+            return pd.DataFrame()
+        
+        # Obtenemos los logs de partidos
+        df = self.get_player_game_logs(player_id=team_id)
+        
+        if df.empty:
+            return df
+        
+        # Buscamos al jugador específico
+        player_name_col = None
+        for col in df.columns:
+            if 'PLAYER_NAME' in col:
+                player_name_col = col
+                break
+        
+        if not player_name_col:
+            print("No se encontró la columna con nombres de jugadores")
+            return pd.DataFrame()
+        
+        return df[df[player_name_col] == jugador]
 
 def print_player_stats(df: pd.DataFrame, player_name: Optional[str] = None):
     """Imprime estadísticas de jugadores."""

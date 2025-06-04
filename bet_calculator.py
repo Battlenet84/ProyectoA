@@ -5,7 +5,6 @@ Incluye cálculos de valor esperado, probabilidad implícita y valor real.
 from nba_stats import NBAStats
 import pandas as pd
 from typing import Dict, Optional, List, Tuple
-from scipy import stats
 
 def calcular_probabilidad_implicita(cuota: float) -> float:
     """
@@ -65,14 +64,36 @@ def get_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
         # Agregar más mapeos según sea necesario
     return column_mapping
 
-def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: float) -> Tuple[float, int, int]:
+def calcular_estadistica_combinada(df: pd.DataFrame, stats: List[str]) -> pd.Series:
+    """
+    Calcula una estadística combinada sumando varias columnas.
+    
+    Args:
+        df: DataFrame con las estadísticas
+        stats: Lista de columnas a sumar
+        
+    Returns:
+        pd.Series: Serie con la suma de las estadísticas
+    """
+    # Verificar que todas las columnas existen
+    for stat in stats:
+        if stat not in df.columns:
+            raise ValueError(f"No se encontró la columna {stat}")
+    
+    # Sumar las columnas
+    return df[stats].sum(axis=1)
+
+def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: float, es_over: bool = True, 
+                                filtro_local: str = "Todos los partidos") -> Tuple[float, int, int]:
     """
     Calcula la probabilidad histórica basada en los datos reales.
     
     Args:
-        df: DataFrame con las estadísticas
-        columna: Nombre de la columna a evaluar
-        umbral: Valor que se debe superar
+        df: DataFrame con las estadísticas partido a partido
+        columna: Nombre de la columna a evaluar o lista de columnas para props combinadas
+        umbral: Valor que se debe superar o no superar
+        es_over: Si es True, calcula probabilidad de superar el umbral. Si es False, de quedar por debajo.
+        filtro_local: "Todos los partidos", "Solo Local" o "Solo Visitante"
         
     Returns:
         Tuple[float, int, int]: (probabilidad, veces_cumplido, total_partidos)
@@ -83,53 +104,52 @@ def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: floa
     
     print("\nColumnas disponibles:", df.columns.tolist())
     
-    # Mapeo de nombres comunes de estadísticas a columnas
-    stat_mapping = {
-        'Puntos': 'PTS',
-        'Asistencias': 'AST',
-        'Rebotes': 'REB',
-        'Triples': 'FG3M',
-        'PTS': 'PTS',
-        'AST': 'AST',
-        'REB': 'REB',
-        'FG3M': 'FG3M'
-    }
+    # Aplicar filtro de local/visitante si es necesario
+    if filtro_local != "Todos los partidos":
+        if 'LOCATION' not in df.columns and 'MATCHUP' in df.columns:
+            # Si no tenemos columna LOCATION pero sí MATCHUP, la creamos
+            df['LOCATION'] = df['MATCHUP'].apply(lambda x: 'Home' if '@' not in x else 'Away')
+        
+        if 'LOCATION' in df.columns:
+            es_local = filtro_local == "Solo Local"
+            df = df[df['LOCATION'] == ('Home' if es_local else 'Away')]
+            if df.empty:
+                print(f"No hay datos para partidos {filtro_local.lower()}")
+                return 0.0, 0, 0
     
-    # Buscar la columna correcta para la estadística
-    stat_column = stat_mapping.get(columna)
-    if not stat_column or stat_column not in df.columns:
-        print(f"No se encontró la columna para {columna}")
-        print(f"Columna buscada: {stat_column}")
-        return 0.0, 0, 0
+    # Si columna es una lista, calcular la estadística combinada
+    if isinstance(columna, list):
+        try:
+            valores = calcular_estadistica_combinada(df, columna)
+        except ValueError as e:
+            print(str(e))
+            return 0.0, 0, 0
+    else:
+        # Verificar que tenemos la columna necesaria
+        if columna not in df.columns:
+            print(f"No se encontró la columna {columna}")
+            return 0.0, 0, 0
+        valores = df[columna]
     
-    if 'GP' not in df.columns:
-        print("No se encontró la columna GP (partidos jugados)")
-        return 0.0, 0, 0
-    
-    print(f"\nDatos del jugador:")
-    print(df[[stat_column, 'GP']].to_string())
-    
-    # Obtener el valor de la estadística y partidos jugados
-    valor_estadistica = df[stat_column].iloc[0]
-    total_partidos = df['GP'].iloc[0]
+    # Contar partidos totales y veces que cumplió la condición
+    total_partidos = len(df)
+    if es_over:
+        veces_cumplido = len(valores[valores > umbral])  # Estrictamente mayor para over
+    else:
+        veces_cumplido = len(valores[valores < umbral])  # Estrictamente menor para under
     
     if total_partidos == 0:
-        print("El jugador no ha jugado ningún partido")
+        print("No hay datos de partidos")
         return 0.0, 0, 0
     
-    # Calcular la probabilidad basada en el promedio
-    probabilidad = valor_estadistica / umbral if umbral > 0 else 0
-    probabilidad = min(0.95, max(0.05, probabilidad))  # Mantener entre 5% y 95%
-    
-    # Calcular el número estimado de partidos donde se superó el umbral
-    veces_cumplido = int(round(probabilidad * total_partidos))
+    probabilidad = veces_cumplido / total_partidos
     
     # Mostrar datos históricos
-    print(f"\nDatos históricos:")
-    print(f"Promedio por partido: {valor_estadistica:.1f}")
+    print(f"\nDatos históricos ({filtro_local}):")
+    print(f"Promedio por partido: {valores.mean():.1f}")
     print(f"Partidos jugados: {total_partidos}")
-    print(f"Umbral a superar: {umbral}")
-    print(f"Estimación de partidos donde superó {umbral}: {veces_cumplido} de {total_partidos} ({(veces_cumplido/total_partidos)*100:.1f}%)")
+    print(f"{'Línea a superar' if es_over else 'Línea a no superar'}: {umbral}")
+    print(f"Veces que {'superó' if es_over else 'quedó bajo'} {umbral}: {veces_cumplido} de {total_partidos} ({probabilidad*100:.1f}%)")
     
     return probabilidad, veces_cumplido, total_partidos
 
@@ -200,43 +220,61 @@ def obtener_probabilidad_prop(stats: NBAStats, equipo: str, jugador: Optional[st
     }
 
 def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str, 
-                     prop: str, umbral: float, cuota: float) -> str:
+                     prop: str, umbral: float, cuota: float,
+                     temporada: Optional[str] = None, tipo_temporada: str = "Regular Season",
+                     es_over: bool = True, filtro_local: str = "Todos los partidos") -> str:
     """
-    Evalúa una apuesta de tipo prop usando datos históricos.
+    Evalúa una apuesta de tipo prop usando datos históricos partido a partido.
+    
+    Args:
+        stats: Instancia de NBAStats
+        equipo: Nombre del equipo
+        jugador: Nombre del jugador
+        prop: Tipo de prop (Puntos, Asistencias, etc)
+        umbral: Valor a superar o no superar
+        cuota: Cuota ofrecida
+        temporada: Temporada a analizar (ej: "2023-24")
+        tipo_temporada: Tipo de temporada (Regular Season, Playoffs, etc)
+        es_over: Si es True, la apuesta es a superar el umbral. Si es False, a quedar por debajo.
+        filtro_local: "Todos los partidos", "Solo Local" o "Solo Visitante"
     """
     print(f"\nBuscando datos para:")
     print(f"Equipo: {equipo}")
     print(f"Jugador: {jugador}")
     print(f"Estadística: {prop}")
+    print(f"Temporada: {temporada}")
+    print(f"Tipo: {tipo_temporada}")
+    print(f"Tipo de apuesta: {'Más de' if es_over else 'Menos de'} {umbral}")
+    print(f"Filtro de localía: {filtro_local}")
     
-    datos = stats.obtener_estadisticas_jugadores_equipo(equipo, None)
+    # Obtener datos generales primero
+    datos = stats.obtener_estadisticas_jugadores_equipo(
+        equipo=equipo,
+        rivales=None,
+        temporada=temporada,
+        tipo_temporada=tipo_temporada
+    )
     
     if datos.empty:
         return "No hay datos disponibles para este equipo."
     
-    # Encontrar la columna correcta para nombres de jugadores
-    player_column = None
-    for col in datos.columns:
-        if 'PLAYER_NAME' in col:
-            player_column = col
-            break
+    # Verificar que tenemos las columnas necesarias
+    if 'PLAYER_NAME' not in datos.columns or 'PLAYER_ID' not in datos.columns:
+        return "Error: No se encontraron las columnas PLAYER_NAME o PLAYER_ID en los datos."
     
-    if not player_column:
-        for col in datos.columns:
-            if 'PLAYER' in col or 'NAME' in col:
-                player_column = col
-                break
-    
-    if not player_column:
-        return "Error: No se pudo encontrar la columna con nombres de jugadores."
+    # Asegurarnos que los nombres sean strings y estén limpios
+    datos['PLAYER_NAME'] = datos['PLAYER_NAME'].astype(str).apply(lambda x: x.strip())
     
     print(f"\nJugadores disponibles en {equipo}:")
-    jugadores = sorted(datos[player_column].unique().tolist())
+    jugadores = sorted(datos['PLAYER_NAME'].unique().tolist())
     for idx, nombre in enumerate(jugadores, 1):
         print(f"{idx}. {nombre}")
     
+    # Convertir el nombre del jugador a string y limpiarlo
+    jugador = str(jugador).strip()
+    
     # Buscar coincidencia exacta primero
-    datos_jugador = datos[datos[player_column] == jugador]
+    datos_jugador = datos[datos['PLAYER_NAME'] == jugador]
     
     # Si no hay coincidencia exacta, buscar coincidencia parcial
     if datos_jugador.empty:
@@ -244,14 +282,78 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
         for nombre_completo in jugadores:
             if jugador.lower() in nombre_completo.lower():
                 print(f"¿Querías decir '{nombre_completo}'?")
-                datos_jugador = datos[datos[player_column] == nombre_completo]
+                datos_jugador = datos[datos['PLAYER_NAME'] == nombre_completo]
                 jugador = nombre_completo
                 break
     
     if datos_jugador.empty:
         return f"No se encontró al jugador '{jugador}' en el equipo {equipo}.\nJugadores disponibles:\n" + "\n".join([f"- {j}" for j in jugadores])
     
-    probabilidad, veces_cumplido, total_partidos = calcular_probabilidad_historica(datos_jugador, prop, umbral)
+    # Obtener el ID del jugador
+    player_id = str(datos_jugador['PLAYER_ID'].iloc[0])
+    
+    # Obtener datos partido a partido
+    datos_partidos = stats.get_player_game_logs(
+        player_id=player_id,
+        season=temporada,
+        season_type=tipo_temporada
+    )
+    
+    if datos_partidos.empty:
+        return f"No se encontraron datos partido a partido para {jugador}"
+    
+    # Mapeo de nombres de estadísticas para datos partido a partido
+    stat_mapping = {
+        'Puntos': 'PTS',
+        'Asistencias': 'AST',
+        'Rebotes': 'REB',
+        'Triples': 'FG3M',
+        'Robos': 'STL',
+        'Tapones': 'BLK',
+        'Pérdidas': 'TOV',
+        # Props combinadas
+        'Puntos + Asistencias': ['PTS', 'AST'],
+        'Puntos + Rebotes': ['PTS', 'REB'],
+        'Asistencias + Rebotes': ['AST', 'REB'],
+        'Puntos + Asistencias + Rebotes': ['PTS', 'AST', 'REB'],
+        'Tapones + Robos': ['BLK', 'STL'],
+        # Mantener también las versiones en inglés por compatibilidad
+        'PTS': 'PTS',
+        'AST': 'AST',
+        'REB': 'REB',
+        'FG3M': 'FG3M',
+        'STL': 'STL',
+        'BLK': 'BLK',
+        'TOV': 'TOV'
+    }
+    
+    # Buscar la columna o columnas correctas para la estadística
+    stat_columns = stat_mapping.get(prop)
+    if not stat_columns:
+        columnas_disponibles = datos_partidos.columns.tolist()
+        return f"No se encontró la columna para la estadística {prop}. Columnas disponibles: {columnas_disponibles}"
+    
+    # Si es una prop combinada, verificar que todas las columnas existen
+    if isinstance(stat_columns, list):
+        for col in stat_columns:
+            if col not in datos_partidos.columns:
+                return f"No se encontró la columna {col} necesaria para {prop}"
+    elif stat_columns not in datos_partidos.columns:
+        return f"No se encontró la columna {stat_columns}"
+    
+    probabilidad, veces_cumplido, total_partidos = calcular_probabilidad_historica(
+        datos_partidos, 
+        stat_columns, 
+        umbral,
+        es_over,
+        filtro_local
+    )
+    
+    # Obtener el promedio
+    if isinstance(stat_columns, list):
+        promedio = calcular_estadistica_combinada(datos_partidos, stat_columns).mean()
+    else:
+        promedio = datos_partidos[stat_columns].mean()
     
     # Valor esperado simple: probabilidad * ganancia - (1-probabilidad) * pérdida
     # Donde ganancia = cuota - 1, y pérdida = 1
@@ -262,14 +364,17 @@ Análisis de la Apuesta:
 ----------------------
 Jugador: {jugador}
 Estadística: {prop}
-Umbral: {umbral}
+Tipo de Apuesta: {'Más' if es_over else 'Menos'} de {umbral}
 Cuota: {cuota}
+Temporada: {temporada if temporada else 'Actual'}
+Tipo: {tipo_temporada}
+Filtro: {filtro_local}
 
 Datos Históricos:
 ---------------
-Promedio: {datos_jugador[prop].iloc[0]:.1f}
+Promedio por partido: {promedio:.1f}
 Partidos jugados: {total_partidos}
-Veces que superó {umbral}: {veces_cumplido} de {total_partidos} ({(veces_cumplido/total_partidos)*100:.1f}%)
+Veces que {'superó' if es_over else 'quedó bajo'} {umbral}: {veces_cumplido} de {total_partidos} ({(veces_cumplido/total_partidos)*100:.1f}%)
 Probabilidad histórica: {probabilidad:.1%}
 
 Análisis de Valor:
