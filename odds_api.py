@@ -34,28 +34,58 @@ class GoogleSheetsOddsLoader:
     def _get_credentials(self):
         """
         Obtiene las credenciales usando Service Account desde los secrets de Streamlit.
+        Si no están disponibles o si está configurado para desarrollo local, intenta cargar desde archivos locales.
         """
         try:
             logger.info("Intentando obtener credenciales...")
             
-            # Intentar obtener las credenciales de los secrets de Streamlit
-            if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
-                logger.info("Credenciales encontradas en Streamlit Secrets")
-                credentials_dict = st.secrets["gcp_service_account"]
-                logger.info("Claves disponibles en credentials_dict: " + ", ".join(credentials_dict.keys()))
-            else:
-                logger.warning("No se encontraron credenciales en Streamlit Secrets")
-                # Fallback a archivo local para desarrollo
-                credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'service-account.json')
-                logger.info(f"Intentando cargar credenciales locales desde: {credentials_path}")
-                
-                if not os.path.exists(credentials_path):
-                    raise FileNotFoundError("No se encontraron credenciales ni en Streamlit Secrets ni en archivo local")
-                    
-                with open(credentials_path, 'r') as f:
-                    credentials_dict = json.load(f)
-                logger.info("Credenciales cargadas desde archivo local")
+            # Verificar si estamos en modo desarrollo local
+            use_local = False
+            if hasattr(st, 'secrets'):
+                if 'gcp_service_account' in st.secrets:
+                    if st.secrets.gcp_service_account.get('use_local_credentials', False):
+                        logger.info("Configurado para usar credenciales locales")
+                        use_local = True
+                    elif len(st.secrets.gcp_service_account) > 1:  # Si tiene más campos además de use_local_credentials
+                        logger.info("Usando credenciales de Streamlit Secrets")
+                        credentials_dict = st.secrets["gcp_service_account"]
+                        logger.info("Claves disponibles en credentials_dict: " + ", ".join(credentials_dict.keys()))
+                        use_local = False
             
+            # Si no hay secrets o estamos en modo desarrollo local, buscar archivos locales
+            if use_local or not hasattr(st, 'secrets'):
+                logger.info("Buscando credenciales en archivos locales...")
+                # Fallback a archivos locales para desarrollo
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                possible_files = [
+                    os.path.join(current_dir, 'service-account.json'),
+                    os.path.join(current_dir, 'credentials.json'),
+                    'service-account.json',  # Buscar en el directorio actual
+                    'credentials.json'       # Buscar en el directorio actual
+                ]
+                
+                credentials_dict = None
+                for file_path in possible_files:
+                    logger.info(f"Intentando cargar credenciales desde: {file_path}")
+                    if os.path.exists(file_path):
+                        try:
+                            with open(file_path, 'r') as f:
+                                credentials_dict = json.load(f)
+                            logger.info(f"Credenciales cargadas desde {file_path}")
+                            break
+                        except Exception as e:
+                            logger.warning(f"Error al cargar {file_path}: {str(e)}")
+                            continue
+                
+                if credentials_dict is None:
+                    raise FileNotFoundError(
+                        "No se encontraron credenciales. Archivos buscados:\n" + 
+                        "\n".join(f"- {f}" for f in possible_files)
+                    )
+            
+            if credentials_dict is None:
+                raise ValueError("No se pudieron obtener las credenciales de ninguna fuente")
+                
             try:
                 # Crear credenciales desde el diccionario
                 self.creds = service_account.Credentials.from_service_account_info(
@@ -73,7 +103,7 @@ class GoogleSheetsOddsLoader:
     def _process_player_name(self, sheet_name: str) -> str:
         """
         Procesa el nombre de la hoja para obtener el nombre completo del jugador.
-        Formato esperado: 'Apellido, Nombre' o 'Apellido_Nombre'
+        Formato esperado: 'Apellido, Nombre', 'Apellido_Nombre', 'Nombre Apellido' o cualquier otro formato
         
         Args:
             sheet_name: Nombre de la hoja del Google Sheets
@@ -90,7 +120,7 @@ class GoogleSheetsOddsLoader:
             if len(parts) == 2:
                 last_name = parts[0].strip()
                 first_name = parts[1].strip()
-                return f"{last_name}, {first_name}"
+                return f"{first_name} {last_name}"  # Retornar en formato "Nombre Apellido"
         
         # Si el nombre usa guión bajo para separar
         elif '_' in name:
@@ -98,7 +128,11 @@ class GoogleSheetsOddsLoader:
             if len(parts) >= 2:
                 last_name = parts[0].strip()
                 first_name = ' '.join(parts[1:]).strip()
-                return f"{last_name}, {first_name}"
+                return f"{first_name} {last_name}"  # Retornar en formato "Nombre Apellido"
+        
+        # Si el nombre ya está en formato "Nombre Apellido"
+        elif ' ' in name:
+            return name
         
         # Si no hay separador, devolver el nombre tal cual
         return name
@@ -108,41 +142,38 @@ class GoogleSheetsOddsLoader:
         Convierte un valor a float, manejando diferentes formatos de números.
         """
         try:
-            print(f"\nIntentando convertir valor: '{value}' (tipo: {type(value)})")
+            logger.debug(f"Intentando convertir valor: '{value}' (tipo: {type(value)})")
             
             if pd.isna(value) or value == '':
-                print("Valor es NA/NaN o vacío")
                 return None
                 
             if isinstance(value, (int, float)):
-                print(f"Valor es numérico: {float(value)}")
                 return float(value)
                 
             # Limpiar el valor
             value_str = str(value).strip()
-            print(f"Valor limpio: '{value_str}'")
             
             # Si está vacío, retornar None
             if not value_str:
-                print("Valor está vacío")
                 return None
                 
-            # Intentar convertir directamente
+            # Reemplazar comas por puntos si hay coma
+            if ',' in value_str:
+                value_str = value_str.replace(',', '.')
+                
+            # Intentar convertir
             try:
-                result = float(value_str)
-                print(f"Conversión directa exitosa: {result}")
-                return result
+                return float(value_str)
             except ValueError:
-                # Reemplazar coma por punto si hay coma
-                if ',' in value_str:
-                    value_str = value_str.replace(',', '.')
-                    result = float(value_str)
-                    print(f"Conversión con reemplazo de coma exitosa: {result}")
-                    return result
-                raise
+                # Si falla, intentar limpiar caracteres no numéricos
+                import re
+                numeric_str = re.sub(r'[^\d.-]', '', value_str)
+                if numeric_str:
+                    return float(numeric_str)
+                return None
                 
         except Exception as e:
-            print(f"Error al convertir valor '{value}': {str(e)}")
+            logger.error(f"Error al convertir valor '{value}': {str(e)}")
             return None
         
     def load_odds(self) -> Dict[str, List[Dict]]:
@@ -209,46 +240,44 @@ class GoogleSheetsOddsLoader:
                         logger.debug(f"Fila {i+1}: {row}")
                         
                         # Si la primera columna no está vacía, es una nueva prop
-                        if row[0].strip():
-                            logger.info(f"\nNueva prop encontrada: {row[0].strip()}")
-                            current_prop = {
-                                'prop_name': row[0].strip(),
-                                'over_line': self._convert_to_float(row[1]),
-                                'under_line': self._convert_to_float(row[2]),
-                                'over_odds': None,
-                                'under_odds': None
-                            }
-                            logger.debug(f"Datos de la prop: {current_prop}")
+                        prop_name = row[0].strip()
+                        if prop_name:
+                            logger.info(f"\nNueva prop encontrada: {prop_name}")
+                            
+                            # Procesar líneas y cuotas
+                            over_line = self._convert_to_float(row[1])
+                            under_line = self._convert_to_float(row[2])
+                            over_odds = None
+                            under_odds = None
                             
                             # Si hay siguiente fila, intentar obtener las cuotas
                             if i + 1 < len(values):
                                 next_row = values[i + 1]
-                                # Asegurarse de que la siguiente fila tiene 3 columnas
                                 while len(next_row) < 3:
                                     next_row.append('')
                                     
-                                logger.debug(f"Fila de cuotas: {next_row}")
+                                over_odds = self._convert_to_float(next_row[1])
+                                under_odds = self._convert_to_float(next_row[2])
                                 
-                                current_prop['over_odds'] = self._convert_to_float(next_row[1])
-                                current_prop['under_odds'] = self._convert_to_float(next_row[2])
-                                
-                                logger.info(f"Cuotas procesadas - Over: {current_prop['over_odds']}, Under: {current_prop['under_odds']}")
-                                
-                                # Validar que tenemos al menos una línea y su cuota correspondiente
-                                if ((current_prop['over_line'] is not None and current_prop['over_odds'] is not None) or
-                                    (current_prop['under_line'] is not None and current_prop['under_odds'] is not None)):
-                                    props_list.append(current_prop)
-                                    logger.info("✓ Prop agregada correctamente")
-                                else:
-                                    logger.warning("✗ Prop ignorada por falta de líneas o cuotas válidas")
-                                
-                                i += 2
+                            # Crear la prop solo si tiene al menos una línea válida
+                            if over_line is not None or under_line is not None:
+                                current_prop = {
+                                    'prop_name': prop_name,
+                                    'over_line': over_line,
+                                    'under_line': under_line,
+                                    'over_odds': over_odds,
+                                    'under_odds': under_odds
+                                }
+                                props_list.append(current_prop)
+                                logger.info("✓ Prop agregada correctamente")
+                                logger.info(f"   Over: {over_line} @ {over_odds}")
+                                logger.info(f"   Under: {under_line} @ {under_odds}")
                             else:
-                                logger.warning("✗ No hay fila de cuotas para esta prop")
-                                i += 1
+                                logger.warning("✗ Prop ignorada por falta de líneas válidas")
+                            
+                            i += 2  # Avanzar dos filas (prop y cuotas)
                         else:
-                            logger.debug("Fila ignorada (primera columna vacía)")
-                            i += 1
+                            i += 1  # Avanzar una fila
                             
                     except Exception as e:
                         logger.error(f"❌ Error procesando fila {i+1}: {str(e)}")

@@ -1,11 +1,80 @@
 import streamlit as st
 from nba_stats import NBAStats
-from bet_calculator import evaluar_prop_bet
+from bet_calculator import evaluar_prop_bet, calcular_probabilidad_historica
 from bet_scraper import BetScraper
 from odds_api import GoogleSheetsOddsLoader
 import pandas as pd
 import re  # Agregar importación del módulo re para expresiones regulares
 from googleapiclient.discovery import build
+
+def normalize_player_name(name: str) -> str:
+    """Normaliza el nombre de un jugador para facilitar la búsqueda."""
+    # Convertir a minúsculas y eliminar puntos y comas
+    name = name.lower().replace('.', '').replace(',', '').strip()
+    
+    # Si el nombre tiene formato "Apellido, Nombre", invertirlo
+    if ',' in name:
+        parts = name.split(',')
+        if len(parts) == 2:
+            name = f"{parts[1].strip()} {parts[0].strip()}"
+    
+    # Eliminar caracteres especiales y espacios múltiples
+    name = re.sub(r'[^a-z\s]', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    
+    return name
+
+def find_player_in_team(df: pd.DataFrame, player_name: str) -> pd.DataFrame:
+    """Busca un jugador en un DataFrame de equipo usando diferentes métodos."""
+    # Normalizar el nombre buscado
+    nombre_norm = normalize_player_name(player_name)
+    
+    # Normalizar nombres en el DataFrame
+    df['PLAYER_NAME_NORM'] = df['PLAYER_NAME'].apply(normalize_player_name)
+    
+    # 1. Coincidencia exacta
+    match_df = df[df['PLAYER_NAME_NORM'] == nombre_norm]
+    if not match_df.empty:
+        return match_df
+    
+    # 2. Coincidencia por apellido
+    apellido = nombre_norm.split()[-1]
+    match_df = df[df['PLAYER_NAME_NORM'].str.endswith(apellido)]
+    if not match_df.empty:
+        return match_df
+    
+    # 3. Coincidencia parcial
+    match_df = df[df['PLAYER_NAME_NORM'].str.contains(nombre_norm, na=False)]
+    if not match_df.empty:
+        return match_df
+    
+    # 4. Coincidencia por partes del nombre
+    for part in nombre_norm.split():
+        if len(part) > 2:  # Evitar partes muy cortas
+            match_df = df[df['PLAYER_NAME_NORM'].str.contains(part, na=False)]
+            if not match_df.empty:
+                return match_df
+    
+    return pd.DataFrame()
+
+def create_combined_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Crea columnas de estadísticas combinadas si no existen."""
+    # Lista de combinaciones posibles
+    combined_stats = {
+        'PTS_AST': ['PTS', 'AST'],
+        'PTS_REB': ['PTS', 'REB'],
+        'AST_REB': ['AST', 'REB'],
+        'PTS_AST_REB': ['PTS', 'AST', 'REB'],
+        'STL_BLK': ['STL', 'BLK']
+    }
+    
+    # Crear cada combinación si las columnas base existen
+    for combined_name, base_stats in combined_stats.items():
+        if combined_name not in df.columns:
+            if all(stat in df.columns for stat in base_stats):
+                df[combined_name] = df[base_stats].sum(axis=1)
+    
+    return df
 
 # Cargar apuestas desde Google Sheets
 SPREADSHEET_ID = "1VTn80vGKu9MbAHZoV9UoVKYyPeVkh-6_N6DMNQInKQk"
@@ -765,116 +834,372 @@ if equipo_sel:
                 if st.button("🔄 Recargar y Analizar Props", key="reload_analyze_odds"):
                     with st.spinner("Cargando y analizando props..."):
                         try:
-                            # Cargar datos
+                            # Cargar datos de Google Sheets
+                            st.info("Cargando datos desde Google Sheets...")
                             st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
+                            
+                            if not st.session_state.odds_data:
+                                st.error("No se encontraron datos en Google Sheets")
+                                st.write("Debug: odds_data está vacío")
+                                st.stop()
+                            
+                            # Mostrar información detallada de las props cargadas
+                            st.write("Debug: Datos cargados de Google Sheets:")
+                            total_props = 0
+                            for jugador, props in st.session_state.odds_data.items():
+                                st.write(f"\nJugador: {jugador}")
+                                for prop in props:
+                                    total_props += 1
+                                    st.write(f"  Prop: {prop['prop_name']}")
+                                    if prop['over_line'] is not None:
+                                        st.write(f"    Over {prop['over_line']} @ {prop['over_odds']}")
+                                    if prop['under_line'] is not None:
+                                        st.write(f"    Under {prop['under_line']} @ {prop['under_odds']}")
+                            
+                            st.success(f"✅ Datos cargados: {len(st.session_state.odds_data)} jugadores y {total_props} props encontradas")
                             
                             # Lista para almacenar todos los análisis
                             analisis_props = []
+                            
+                            # Barra de progreso
+                            total_props = sum(
+                                len(props) * 2 for props in st.session_state.odds_data.values()
+                            )  # *2 porque cada prop tiene over y under
+                            
+                            progress_bar = st.progress(0)
+                            progress_text = st.empty()
+                            status_text = st.empty()
+                            props_analizadas = 0
+                            
+                            # Diccionario para evitar duplicados
+                            props_procesadas = set()
+
+                            # Primero obtener la lista de todos los equipos y sus jugadores
+                            status_text.text("Cargando datos de equipos...")
+                            equipos_data = {}
+                            for equipo in nba.obtener_lista_equipos():
+                                try:
+                                    df_temp = nba.obtener_estadisticas_jugadores_equipo(
+                                        equipo=equipo,
+                                        temporada=temporada_sel,
+                                        tipo_temporada=tipos_temporada_sel
+                                    )
+                                    if not df_temp.empty:
+                                        equipos_data[equipo] = df_temp
+                                        st.write(f"Debug: Cargados {len(df_temp)} jugadores del equipo {equipo}")
+                                except Exception as e:
+                                    st.write(f"Debug: Error al cargar datos del equipo {equipo}: {str(e)}")
+                            
+                            st.write(f"Debug: Datos cargados para {len(equipos_data)} equipos")
+                            
+                            # Diccionario para cachear datos de jugadores
+                            cache_datos_jugador = {}
                             
                             # Procesar cada prop
                             for jugador, props in st.session_state.odds_data.items():
                                 # Extraer nombre del jugador (antes de la coma si existe)
                                 nombre_jugador = jugador.split(',')[0] if ',' in jugador else jugador
+                                status_text.text(f"Procesando jugador: {nombre_jugador}")
+                                st.write(f"\nDebug: Procesando jugador: {nombre_jugador}")
                                 
-                                for prop in props:
-                                    # Analizar over si existe
-                                    if prop['over_line'] is not None and prop['over_odds'] is not None:
-                                        try:
-                                            # Asegurarnos de que los valores sean numéricos
-                                            over_line = float(prop['over_line'])
-                                            over_odds = float(prop['over_odds'])
-                                            
-                                            resultado = evaluar_prop_bet(
-                                                stats=nba,
-                                                equipo=equipo_sel,
-                                                jugador=nombre_jugador,
-                                                prop=prop['prop_name'],
-                                                umbral=over_line,
-                                                cuota=over_odds,
-                                                temporada=temporada_sel,
-                                                tipo_temporada=tipos_temporada_sel,
-                                                es_over=True
-                                            )
-                                            
-                                            # Extraer valor esperado y probabilidad
-                                            valor_esperado = None
-                                            probabilidad = None
-                                            for linea in resultado.split('\n'):
-                                                if 'Valor esperado por unidad apostada:' in linea:
-                                                    try:
-                                                        valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
-                                                    except (AttributeError, ValueError):
-                                                        valor_esperado = None
-                                                elif 'Probabilidad histórica:' in linea:
-                                                    try:
-                                                        prob_str = re.search(r'(\d+\.?\d*)%', linea)
-                                                        if prob_str:
-                                                            probabilidad = float(prob_str.group(1)) / 100
-                                                    except (AttributeError, ValueError):
-                                                        probabilidad = None
-                                            
-                                            if valor_esperado is not None:  # Solo agregar si tenemos un valor esperado válido
-                                                analisis_props.append({
-                                                    'jugador': jugador,
-                                                    'tipo': prop['prop_name'],
-                                                    'linea': f">{over_line}",
-                                                    'cuota': over_odds,
-                                                    'probabilidad': probabilidad,
-                                                    'valor_esperado': valor_esperado,
-                                                    'recomendacion': '✅' if valor_esperado > 0 else '❌'
-                                                })
-                                        except Exception as e:
-                                            st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Over: {str(e)}")
+                                # Obtener datos del jugador una sola vez y cachearlos
+                                if nombre_jugador not in cache_datos_jugador:
+                                    try:
+                                        status_text.text(f"Buscando estadísticas de {nombre_jugador}...")
                                         
-                                    # Analizar under si existe
-                                    if prop['under_line'] is not None and prop['under_odds'] is not None:
-                                        try:
-                                            # Asegurarnos de que los valores sean numéricos
-                                            under_line = float(prop['under_line'])
-                                            under_odds = float(prop['under_odds'])
-                                            
-                                            resultado = evaluar_prop_bet(
-                                                stats=nba,
-                                                equipo=equipo_sel,
-                                                jugador=nombre_jugador,
-                                                prop=prop['prop_name'],
-                                                umbral=under_line,
-                                                cuota=under_odds,
-                                                temporada=temporada_sel,
-                                                tipo_temporada=tipos_temporada_sel,
-                                                es_over=False
-                                            )
-                                            
-                                            # Extraer valor esperado y probabilidad
-                                            valor_esperado = None
-                                            probabilidad = None
-                                            for linea in resultado.split('\n'):
-                                                if 'Valor esperado por unidad apostada:' in linea:
-                                                    try:
-                                                        valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
-                                                    except (AttributeError, ValueError):
-                                                        valor_esperado = None
-                                                elif 'Probabilidad histórica:' in linea:
-                                                    try:
-                                                        prob_str = re.search(r'(\d+\.?\d*)%', linea)
-                                                        if prob_str:
-                                                            probabilidad = float(prob_str.group(1)) / 100
-                                                    except (AttributeError, ValueError):
-                                                        probabilidad = None
-                                            
-                                            if valor_esperado is not None:  # Solo agregar si tenemos un valor esperado válido
-                                                analisis_props.append({
-                                                    'jugador': jugador,
-                                                    'tipo': prop['prop_name'],
-                                                    'linea': f"<{under_line}",
-                                                    'cuota': under_odds,
-                                                    'probabilidad': probabilidad,
-                                                    'valor_esperado': valor_esperado,
-                                                    'recomendacion': '✅' if valor_esperado > 0 else '❌'
-                                                })
-                                        except Exception as e:
-                                            st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Under: {str(e)}")
+                                        # Buscar jugador en todos los equipos
+                                        equipo_encontrado = None
+                                        df_jugador = None
+                                        
+                                        for equipo, df_equipo in equipos_data.items():
+                                            df_match = find_player_in_team(df_equipo.copy(), nombre_jugador)
+                                            if not df_match.empty:
+                                                equipo_encontrado = equipo
+                                                df_jugador = df_match
+                                                st.write(f"Debug: ✅ Jugador encontrado en el equipo {equipo}")
+                                                st.write(f"Debug: Nombre en estadísticas: {df_jugador['PLAYER_NAME'].iloc[0]}")
+                                                break
+                                        
+                                        if equipo_encontrado is None:
+                                            st.warning(f"No se encontró el equipo actual de {nombre_jugador}")
+                                            st.write("Debug: No se encontró el equipo del jugador")
+                                            continue
+                                        
+                                        # Obtener el ID del jugador
+                                        player_id = str(df_jugador['PLAYER_ID'].iloc[0])
+                                        status_text.text(f"Obteniendo datos partido a partido de {nombre_jugador}...")
+                                        st.write(f"Debug: ID del jugador: {player_id}")
+                                        
+                                        # Obtener datos partido a partido
+                                        datos_partidos = nba.get_player_game_logs(
+                                            player_id=player_id,
+                                            season=temporada_sel,
+                                            season_type=tipos_temporada_sel
+                                        )
+                                        
+                                        if datos_partidos.empty:
+                                            st.warning(f"No se encontraron datos partido a partido para {nombre_jugador}")
+                                            st.write("Debug: DataFrame de partidos está vacío")
+                                            continue
+                                        
+                                        # Crear columnas combinadas
+                                        datos_partidos = create_combined_stats(datos_partidos)
+                                        st.write("Debug: Columnas después de crear combinaciones:", datos_partidos.columns.tolist())
+                                                
+                                        cache_datos_jugador[nombre_jugador] = datos_partidos
+                                        status_text.success(f"✅ Datos obtenidos para {nombre_jugador}")
+                                        
+                                    except Exception as e:
+                                        st.error(f"Error al obtener datos de {nombre_jugador}: {str(e)}")
+                                        st.write(f"Debug: Error completo:", str(e))
+                                        import traceback
+                                        st.write("Debug: Traceback:", traceback.format_exc())
+                                        continue
                                 
+                                # Usar los datos cacheados para analizar las props
+                                datos_partidos = cache_datos_jugador.get(nombre_jugador)
+                                if datos_partidos is not None and not datos_partidos.empty:
+                                    for prop in props:
+                                        # Actualizar progreso
+                                        progress_text.text(f"Analizando {nombre_jugador} - {prop['prop_name']}")
+                                        st.write(f"\nDebug: Analizando prop {prop['prop_name']} para {nombre_jugador}")
+                                        
+                                        # Mapear nombres de props a columnas de estadísticas
+                                        stat_mapping = {
+                                            # Estadísticas básicas - español
+                                            'Puntos': 'PTS',
+                                            'Asistencias': 'AST',
+                                            'Rebotes': 'REB',
+                                            'Triples': 'FG3M',
+                                            'Robos': 'STL',
+                                            'Tapones': 'BLK',
+                                            'Bloqueos': 'BLK',
+                                            'Pérdidas': 'TOV',
+                                            'Pérdidas de balón': 'TOV',
+                                            
+                                            # Props combinadas - español
+                                            'Puntos + Asistencias': 'PTS_AST',
+                                            'Puntos y Asistencias': 'PTS_AST',
+                                            'Puntos más Asistencias': 'PTS_AST',
+                                            'Puntos+Asistencias': 'PTS_AST',
+                                            
+                                            'Puntos + Rebotes': 'PTS_REB',
+                                            'Puntos y Rebotes': 'PTS_REB',
+                                            'Puntos más Rebotes': 'PTS_REB',
+                                            'Puntos+Rebotes': 'PTS_REB',
+                                            
+                                            'Asistencias + Rebotes': 'AST_REB',
+                                            'Asistencias y Rebotes': 'AST_REB',
+                                            'Asistencias más Rebotes': 'AST_REB',
+                                            'Asistencias+Rebotes': 'AST_REB',
+                                            
+                                            'Puntos + Asistencias + Rebotes': 'PTS_AST_REB',
+                                            'Puntos, Asistencias y Rebotes': 'PTS_AST_REB',
+                                            'Puntos más Asistencias más Rebotes': 'PTS_AST_REB',
+                                            'Puntos+Asistencias+Rebotes': 'PTS_AST_REB',
+                                            
+                                            'Tapones + Robos': 'STL_BLK',
+                                            'Tapones y Robos': 'STL_BLK',
+                                            'Tapones más Robos': 'STL_BLK',
+                                            'Bloqueos + Robos': 'STL_BLK',
+                                            'Bloqueos y Robos': 'STL_BLK',
+                                            'Bloqueos más Robos': 'STL_BLK',
+                                            'Tapones+Robos': 'STL_BLK',
+                                            'Bloqueos+Robos': 'STL_BLK',
+                                            
+                                            # Estadísticas básicas - inglés
+                                            'Points': 'PTS',
+                                            'Assists': 'AST',
+                                            'Rebounds': 'REB',
+                                            'Threes': 'FG3M',
+                                            'Steals': 'STL',
+                                            'Blocks': 'BLK',
+                                            'Turnovers': 'TOV',
+                                            
+                                            # Props combinadas - inglés
+                                            'Points + Assists': 'PTS_AST',
+                                            'Points and Assists': 'PTS_AST',
+                                            'Points & Assists': 'PTS_AST',
+                                            'Points+Assists': 'PTS_AST',
+                                            
+                                            'Points + Rebounds': 'PTS_REB',
+                                            'Points and Rebounds': 'PTS_REB',
+                                            'Points & Rebounds': 'PTS_REB',
+                                            'Points+Rebounds': 'PTS_REB',
+                                            
+                                            'Assists + Rebounds': 'AST_REB',
+                                            'Assists and Rebounds': 'AST_REB',
+                                            'Assists & Rebounds': 'AST_REB',
+                                            'Assists+Rebounds': 'AST_REB',
+                                            
+                                            'Points + Assists + Rebounds': 'PTS_AST_REB',
+                                            'Points, Assists and Rebounds': 'PTS_AST_REB',
+                                            'Points, Assists & Rebounds': 'PTS_AST_REB',
+                                            'Points+Assists+Rebounds': 'PTS_AST_REB',
+                                            
+                                            'Blocks + Steals': 'STL_BLK',
+                                            'Blocks and Steals': 'STL_BLK',
+                                            'Blocks & Steals': 'STL_BLK',
+                                            'Blocks+Steals': 'STL_BLK',
+                                            
+                                            # Versiones cortas
+                                            'PTS': 'PTS',
+                                            'AST': 'AST',
+                                            'REB': 'REB',
+                                            'FG3M': 'FG3M',
+                                            'STL': 'STL',
+                                            'BLK': 'BLK',
+                                            'TOV': 'TOV',
+                                            'PTS+AST': 'PTS_AST',
+                                            'PTS_AST': 'PTS_AST',
+                                            'PTS+REB': 'PTS_REB',
+                                            'PTS_REB': 'PTS_REB',
+                                            'AST+REB': 'AST_REB',
+                                            'AST_REB': 'AST_REB',
+                                            'PTS+AST+REB': 'PTS_AST_REB',
+                                            'PTS_AST_REB': 'PTS_AST_REB',
+                                            'STL+BLK': 'STL_BLK',
+                                            'STL_BLK': 'STL_BLK'
+                                        }
+                                        
+                                        # Obtener el nombre de la columna correcto
+                                        prop_name = prop['prop_name'].strip()
+                                        stat_name = stat_mapping.get(prop_name)
+                                        
+                                        if not stat_name:
+                                            # Si no encontramos coincidencia exacta, intentar normalizar
+                                            prop_name_norm = prop_name.lower().replace(' ', '').replace('+', '_')
+                                            for key, value in stat_mapping.items():
+                                                key_norm = key.lower().replace(' ', '').replace('+', '_')
+                                                if key_norm == prop_name_norm:
+                                                    stat_name = value
+                                                    break
+                                        
+                                        if not stat_name:
+                                            st.warning(f"No se pudo mapear la prop {prop_name} a una estadística")
+                                            st.write(f"Debug: Prop {prop_name} no encontrada en el mapeo")
+                                            continue
+                                        
+                                        st.write(f"Debug: Prop {prop_name} mapeada a {stat_name}")
+                                        
+                                        # Verificar si la columna existe o necesita ser creada
+                                        if stat_name not in datos_partidos.columns:
+                                            if '_' in stat_name:
+                                                stats_base = stat_name.split('_')
+                                                if all(stat in datos_partidos.columns for stat in stats_base):
+                                                    st.write(f"Debug: Creando columna combinada {stat_name}")
+                                                    datos_partidos[stat_name] = datos_partidos[stats_base].sum(axis=1)
+                                                    st.write(f"Debug: Columna {stat_name} creada exitosamente")
+                                                else:
+                                                    missing_stats = [stat for stat in stats_base if stat not in datos_partidos.columns]
+                                                    st.warning(f"No se encontraron todas las estadísticas necesarias para {prop_name}")
+                                                    st.write(f"Debug: Faltan las columnas: {missing_stats}")
+                                                    continue
+                                            else:
+                                                st.warning(f"No se encontró la estadística {stat_name} para {nombre_jugador}")
+                                                st.write(f"Debug: Columna {stat_name} no encontrada")
+                                                continue
+                                        
+                                        # Analizar over si existe
+                                        if prop['over_line'] is not None and prop['over_odds'] is not None:
+                                            try:
+                                                # Crear una clave única para esta prop
+                                                prop_key = f"{nombre_jugador}_{prop['prop_name']}_over_{prop['over_line']}"
+                                                
+                                                if prop_key not in props_procesadas:
+                                                    props_procesadas.add(prop_key)
+                                                    
+                                                    # Asegurarnos de que los valores sean numéricos
+                                                    over_line = float(prop['over_line'])
+                                                    over_odds = float(prop['over_odds'])
+                                                    
+                                                    st.write(f"Debug: Analizando Over {over_line} @ {over_odds}")
+                                                    
+                                                    prob, cumplidos, total = calcular_probabilidad_historica(
+                                                        datos_partidos,
+                                                        stat_name,
+                                                        over_line,
+                                                        es_over=True
+                                                    )
+                                                    
+                                                    st.write(f"Debug: Probabilidad calculada: {prob:.2%} ({cumplidos}/{total} partidos)")
+                                                    
+                                                    if prob > 0 and total > 0:
+                                                        # Calcular valor esperado
+                                                        valor_esperado = (prob * (over_odds - 1)) - ((1 - prob) * 1)
+                                                        
+                                                        analisis_props.append({
+                                                            'jugador': jugador,
+                                                            'tipo': prop['prop_name'],
+                                                            'linea': f">{over_line}",
+                                                            'cuota': over_odds,
+                                                            'probabilidad': prob,
+                                                            'valor_esperado': valor_esperado,
+                                                            'recomendacion': '✅' if valor_esperado > 0 else '❌',
+                                                            'partidos': total
+                                                        })
+                                                        st.write(f"Debug: Análisis Over agregado con valor esperado: {valor_esperado:.3f}")
+                                            except Exception as e:
+                                                st.error(f"Error al analizar {jugador} - {prop['prop_name']} Over: {str(e)}")
+                                        
+                                        props_analizadas += 1
+                                        progress_bar.progress(props_analizadas / total_props)
+                                        
+                                        # Analizar under si existe
+                                        if prop['under_line'] is not None and prop['under_odds'] is not None:
+                                            try:
+                                                # Crear una clave única para esta prop
+                                                prop_key = f"{nombre_jugador}_{prop['prop_name']}_under_{prop['under_line']}"
+                                                
+                                                if prop_key not in props_procesadas:
+                                                    props_procesadas.add(prop_key)
+                                                    
+                                                    # Asegurarnos de que los valores sean numéricos
+                                                    under_line = float(prop['under_line'])
+                                                    under_odds = float(prop['under_odds'])
+                                                    
+                                                    # Verificar si tenemos la estadística
+                                                    if stat_name in datos_partidos.columns:
+                                                        prob, cumplidos, total = calcular_probabilidad_historica(
+                                                            datos_partidos,
+                                                            stat_name,
+                                                            under_line,
+                                                            es_over=False
+                                                        )
+                                                        
+                                                        if prob > 0 and total > 0:
+                                                            # Calcular valor esperado
+                                                            valor_esperado = (prob * (under_odds - 1)) - ((1 - prob) * 1)
+                                                            
+                                                            analisis_props.append({
+                                                                'jugador': jugador,
+                                                                'tipo': prop['prop_name'],
+                                                                'linea': f"<{under_line}",
+                                                                'cuota': under_odds,
+                                                                'probabilidad': prob,
+                                                                'valor_esperado': valor_esperado,
+                                                                'recomendacion': '✅' if valor_esperado > 0 else '❌',
+                                                                'partidos': total
+                                                            })
+                                            except Exception as e:
+                                                st.error(f"Error al analizar {jugador} - {prop['prop_name']} Under: {str(e)}")
+                                        
+                                        props_analizadas += 1
+                                        progress_bar.progress(props_analizadas / total_props)
+                                
+                            # Limpiar elementos de progreso
+                            progress_bar.empty()
+                            progress_text.empty()
+                            status_text.empty()
+                            
+                            # Convertir a DataFrame y eliminar duplicados basados en todas las columnas excepto 'recomendacion'
+                            if analisis_props:
+                                df_analisis = pd.DataFrame(analisis_props)
+                                df_analisis = df_analisis.drop_duplicates(
+                                    subset=['jugador', 'tipo', 'linea', 'cuota', 'probabilidad', 'valor_esperado', 'partidos']
+                                )
+                                analisis_props = df_analisis.to_dict('records')
+                            
                             # Guardar análisis en session state
                             st.session_state.historial_apuestas = analisis_props
                             
@@ -886,76 +1211,80 @@ if equipo_sel:
                             
                         except Exception as e:
                             st.error(f"Error al cargar/analizar datos: {str(e)}")
-                
-                # Mostrar historial de análisis
-                if 'historial_apuestas' in st.session_state and st.session_state.historial_apuestas:
-                    st.markdown("---")
-                    st.header("📚 Resumen de Props Analizadas")
                     
-                    # Crear DataFrame del historial
-                    df_historial = pd.DataFrame(st.session_state.historial_apuestas)
-                    
-                    # Ordenar por valor esperado (mejor a peor)
-                    df_historial = df_historial.sort_values('valor_esperado', ascending=False)
-                    
-                    # Formatear el valor esperado y la probabilidad
-                    df_historial['valor_esperado'] = df_historial['valor_esperado'].apply(
-                        lambda x: f"{x:+.2f}" if x is not None else "N/A"
-                    )
-                    df_historial['probabilidad'] = df_historial['probabilidad'].apply(
-                        lambda x: f"{x*100:.1f}%" if x is not None else "N/A"
-                    )
-                    
-                    # Mostrar tabla con estilo
-                    st.dataframe(
-                        df_historial,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "jugador": st.column_config.TextColumn(
-                                "Jugador",
-                                width="medium",
-                                help="Nombre del jugador"
-                            ),
-                            "tipo": st.column_config.TextColumn(
-                                "Tipo",
-                                width="medium",
-                                help="Tipo de prop"
-                            ),
-                            "linea": st.column_config.TextColumn(
-                                "Línea",
-                                width="small",
-                                help="Valor de la línea"
-                            ),
-                            "cuota": st.column_config.NumberColumn(
-                                "Cuota",
-                                format="%.2f",
-                                help="Cuota ofrecida"
-                            ),
-                            "probabilidad": st.column_config.TextColumn(
-                                "Prob. Hist.",
-                                width="small",
-                                help="Probabilidad histórica"
-                            ),
-                            "valor_esperado": st.column_config.TextColumn(
-                                "Valor Esp.",
-                                width="small",
-                                help="Valor esperado por unidad apostada"
-                            ),
-                            "recomendacion": st.column_config.TextColumn(
-                                "Rec.",
-                                width="small",
-                                help="Recomendación de apuesta"
-                            )
-                        }
-                    )
-                    
-                    # Botón para limpiar historial
-                    if st.button("🗑️ Limpiar Historial", key='limpiar_historial'):
-                        st.session_state.historial_apuestas = []
-                        st.rerun()
-                else:
-                    st.info("No hay props analizadas. Usa el botón 'Recargar y Analizar Props' para comenzar.")
+                    # Mostrar historial de análisis
+                    if 'historial_apuestas' in st.session_state and st.session_state.historial_apuestas:
+                        st.markdown("---")
+                        st.header("📚 Resumen de Props Analizadas")
+                        
+                        # Crear DataFrame del historial
+                        df_historial = pd.DataFrame(st.session_state.historial_apuestas)
+                        
+                        # Ordenar por valor esperado (mejor a peor)
+                        df_historial = df_historial.sort_values('valor_esperado', ascending=False)
+                        
+                        # Formatear el valor esperado y la probabilidad
+                        df_historial['valor_esperado'] = df_historial['valor_esperado'].apply(
+                            lambda x: f"{x:+.2f}" if x is not None else "N/A"
+                        )
+                        df_historial['probabilidad'] = df_historial['probabilidad'].apply(
+                            lambda x: f"{x*100:.1f}%" if x is not None else "N/A"
+                        )
+                        
+                        # Mostrar tabla con estilo
+                        st.dataframe(
+                            df_historial,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "jugador": st.column_config.TextColumn(
+                                    "Jugador",
+                                    width="medium",
+                                    help="Nombre del jugador"
+                                ),
+                                "tipo": st.column_config.TextColumn(
+                                    "Tipo",
+                                    width="medium",
+                                    help="Tipo de prop"
+                                ),
+                                "linea": st.column_config.TextColumn(
+                                    "Línea",
+                                    width="small",
+                                    help="Valor de la línea"
+                                ),
+                                "cuota": st.column_config.NumberColumn(
+                                    "Cuota",
+                                    format="%.2f",
+                                    help="Cuota ofrecida"
+                                ),
+                                "probabilidad": st.column_config.TextColumn(
+                                    "Prob. Hist.",
+                                    width="small",
+                                    help="Probabilidad histórica"
+                                ),
+                                "valor_esperado": st.column_config.TextColumn(
+                                    "Valor Esp.",
+                                    width="small",
+                                    help="Valor esperado por unidad apostada"
+                                ),
+                                "recomendacion": st.column_config.TextColumn(
+                                    "Rec.",
+                                    width="small",
+                                    help="Recomendación de apuesta"
+                                ),
+                                "partidos": st.column_config.NumberColumn(
+                                    "Partidos",
+                                    help="Número de partidos analizados"
+                                )
+                            }
+                        )
+                        
+                        # Botón para limpiar historial
+                        if st.button("🗑️ Limpiar Historial", key='limpiar_historial'):
+                            st.session_state.historial_apuestas = []
+                            st.rerun()
+                    else:
+                        st.info("No hay props analizadas. Usa el botón 'Recargar y Analizar Props' para comenzar.")
             
             except Exception as e:
                 st.error(f"Error en la pestaña de apuestas cargadas: {str(e)}")

@@ -243,6 +243,34 @@ def obtener_probabilidad_prop(stats: NBAStats, equipo: str, jugador: Optional[st
         "umbral": umbral
     }
 
+def _normalize_name(name: str) -> str:
+    """
+    Normaliza un nombre para hacer las comparaciones más robustas.
+    Elimina espacios extra, puntos, y convierte a minúsculas.
+    """
+    return name.lower().replace('.', '').strip()
+
+def _find_matching_player(jugadores_disponibles: List[str], jugador_buscado: str) -> Optional[str]:
+    """
+    Busca un jugador en la lista de jugadores disponibles, usando coincidencia parcial si es necesario.
+    """
+    jugador_norm = _normalize_name(jugador_buscado)
+    
+    # Primero intentar coincidencia exacta
+    for jugador in jugadores_disponibles:
+        if _normalize_name(jugador) == jugador_norm:
+            return jugador
+    
+    # Si no hay coincidencia exacta, buscar coincidencia parcial
+    for jugador in jugadores_disponibles:
+        if jugador_norm in _normalize_name(jugador):
+            return jugador
+        # También buscar si el nombre buscado contiene el nombre disponible
+        if _normalize_name(jugador) in jugador_norm:
+            return jugador
+    
+    return None
+
 def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str, 
                      prop: str, umbral: float, cuota: float,
                      temporada: Optional[str] = None, tipo_temporada: str = "Regular Season",
@@ -304,24 +332,13 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
     for idx, nombre in enumerate(jugadores, 1):
         print(f"{idx}. {nombre}")
     
-    # Convertir el nombre del jugador a string y limpiarlo
-    jugador = str(jugador).strip()
-    
-    # Buscar coincidencia exacta primero
-    datos_jugador = df_jugadores[df_jugadores['PLAYER_NAME'] == jugador]
-    
-    # Si no hay coincidencia exacta, buscar coincidencia parcial
-    if datos_jugador.empty:
-        print(f"\nNo se encontró coincidencia exacta para '{jugador}'. Buscando coincidencias parciales...")
-        for nombre_completo in jugadores:
-            if jugador.lower() in nombre_completo.lower():
-                print(f"¿Querías decir '{nombre_completo}'?")
-                datos_jugador = df_jugadores[df_jugadores['PLAYER_NAME'] == nombre_completo]
-                jugador = nombre_completo
-                break
-    
-    if datos_jugador.empty:
+    # Buscar coincidencia del jugador usando la función de coincidencia
+    nombre_encontrado = _find_matching_player(jugadores, jugador)
+    if not nombre_encontrado:
         return f"No se encontró al jugador '{jugador}' en el equipo {equipo}.\nJugadores disponibles:\n" + "\n".join([f"- {j}" for j in jugadores])
+    
+    print(f"\nJugador encontrado: {nombre_encontrado}")
+    datos_jugador = df_jugadores[df_jugadores['PLAYER_NAME'] == nombre_encontrado]
     
     # Obtener el ID del jugador
     player_id = str(datos_jugador['PLAYER_ID'].iloc[0])
@@ -342,7 +359,7 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
             datos_partidos = pd.concat([datos_partidos, df_temp], ignore_index=True)
     
     if datos_partidos.empty:
-        return f"No se encontraron datos partido a partido para {jugador}"
+        return f"No se encontraron datos partido a partido para {nombre_encontrado}"
     
     # Mapeo de nombres de estadísticas para datos partido a partido
     stat_mapping = {
@@ -438,12 +455,31 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
         stat_columns = stat_mapping.get(prop_normalizada)
         
         if not stat_columns:
+            # Intentar buscar coincidencia parcial
+            for key in stat_mapping:
+                if _normalize_name(key) == _normalize_name(prop):
+                    stat_columns = stat_mapping[key]
+                    break
+        
+        if not stat_columns:
             columnas_disponibles = datos_partidos.columns.tolist()
             return f"No se encontró la columna para la estadística {prop}. Columnas disponibles: {columnas_disponibles}"
     
     # Verificar que la columna existe
     if stat_columns not in datos_partidos.columns:
-        return f"No se encontró la columna {stat_columns} necesaria para {prop}"
+        # Si es una prop combinada, intentar crearla
+        if '_' in stat_columns:
+            stats_base = stat_columns.split('_')
+            if all(stat in datos_partidos.columns for stat in stats_base):
+                print(f"\nCreando columna combinada {stat_columns} a partir de {stats_base}")
+                # Crear la columna combinada
+                datos_partidos[stat_columns] = datos_partidos[stats_base].sum(axis=1)
+                print(f"✓ Columna {stat_columns} creada exitosamente")
+            else:
+                missing_stats = [stat for stat in stats_base if stat not in datos_partidos.columns]
+                return f"No se encontraron las columnas base necesarias: {missing_stats}"
+        else:
+            return f"No se encontró la columna {stat_columns} necesaria para {prop}"
     
     # Asegurarnos de que los valores nulos sean 0
     datos_partidos[stat_columns] = datos_partidos[stat_columns].fillna(0)
@@ -486,7 +522,7 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
     analisis = f"""
 Análisis de la Apuesta:
 ----------------------
-Jugador: {jugador}
+Jugador: {nombre_encontrado}
 Estadística: {prop}
 Tipo de Apuesta: {'Más' if es_over else 'Menos'} de {umbral}
 Cuota: {cuota}

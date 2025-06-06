@@ -3,9 +3,12 @@ Módulo para manejar la obtención y visualización de datos de la NBA.
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 import pandas as pd
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime
+import time
 
 
 class NBAStats:
@@ -15,9 +18,9 @@ class NBAStats:
     PRE_SEASON = "Pre Season"
     ALL_STAR = "All Star"
     
-    # Lista de temporadas disponibles (últimos 5 años)
+    # Lista de temporadas disponibles
     TEMPORADAS = [
-        "2024-25",
+        "2024-25",  # Incluye proyecciones y datos de pretemporada
         "2023-24",
         "2022-23",
         "2021-22",
@@ -33,27 +36,53 @@ class NBAStats:
         ALL_STAR
     ]
     
+    def _validate_season(self, season: str) -> bool:
+        """Valida si una temporada es válida y está disponible."""
+        try:
+            if season not in self.TEMPORADAS:
+                print(f"Advertencia: La temporada {season} no está en la lista de temporadas conocidas")
+                # Verificar si el formato es correcto (YYYY-YY)
+                if not (len(season) == 7 and season[4] == '-' and season[:4].isdigit() and season[5:].isdigit()):
+                    print(f"Error: Formato de temporada inválido. Debe ser YYYY-YY")
+                    return False
+                # Si el formato es correcto, permitir la temporada aunque no esté en la lista
+                print("Sin embargo, el formato es correcto, se intentará obtener los datos")
+                return True
+            return True
+        except Exception as e:
+            print(f"Error al validar la temporada: {str(e)}")
+            return False
+    
     def __init__(self):
         self.base_url = "https://stats.nba.com/stats/"
         # Obtener la temporada actual basada en la fecha
         self.current_season = self._get_current_season()
+        
+        # Configurar reintentos
+        retry_strategy = Retry(
+            total=3,  # número total de reintentos
+            backoff_factor=1,  # tiempo de espera entre reintentos
+            status_forcelist=[429, 500, 502, 503, 504]  # códigos HTTP para reintentar
+        )
+        
+        # Crear sesión con la estrategia de reintentos
+        self.session = requests.Session()
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        
+        # Headers para las peticiones
         self.headers = {
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "keep-alive",
-            "Host": "stats.nba.com",
-            "Origin": "https://www.nba.com",
-            "Referer": "https://www.nba.com/",
-            "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "x-nba-stats-origin": "stats",
-            "x-nba-stats-token": "true"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.nba.com/',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site'
         }
         
         # Diccionario de equipos NBA
@@ -77,28 +106,174 @@ class NBAStats:
         print("NBA Stats inicializado con headers actualizados")
 
     def _get_current_season(self) -> str:
-        """Determina la temporada actual basada en la fecha."""
-        now = datetime.now()
-        year = now.year
-        month = now.month
+        """
+        Determina la temporada actual basada en la fecha.
+        La temporada NBA comienza en octubre y termina en junio del siguiente año.
+        """
+        current_date = datetime.now()
+        year = current_date.year
+        month = current_date.month
         
-        # Si estamos entre octubre y diciembre, la temporada es year-year+1
-        # Si estamos entre enero y septiembre, la temporada es year-1-year
-        if month >= 10:
-            return f"{year}-{str(year+1)[2:]}"
+        # Si estamos entre julio y diciembre, la temporada es el año actual + siguiente
+        if month >= 7:
+            return f"{year}-{str(year + 1)[2:]}"
+        # Si estamos entre enero y junio, la temporada es el año anterior + actual
         else:
             return f"{year-1}-{str(year)[2:]}"
+
+    def _make_request(self, url: str, params: Dict = None, timeout: int = 60) -> Dict:
+        """Realiza una petición a la API con reintentos y manejo de errores."""
+        max_retries = 3
+        retry_delay = 2  # segundos
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(
+                    url,
+                    params=params,
+                    headers=self.headers,
+                    timeout=timeout
+                )
+                response.raise_for_status()
+                
+                # Esperar un poco entre llamadas para evitar límites de velocidad
+                time.sleep(1)
+                
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:  # último intento
+                    raise Exception(f"Error después de {max_retries} intentos: {str(e)}")
+                print(f"Intento {attempt + 1} falló, reintentando en {retry_delay} segundos...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # aumentar el tiempo de espera exponencialmente
 
     def get_player_stats(self, season: str = None, season_type: str = REGULAR_SEASON, vs_team_id: str = None) -> pd.DataFrame:
         """Obtiene estadísticas de jugadores."""
         if season is None:
+            season = self._get_current_season()  # Usar el método para determinar la temporada actual
+            print(f"Usando temporada actual: {season}")
+            
+        if not self._validate_season(season):
+            print(f"Advertencia: La temporada {season} podría no tener datos completos")
+        
+        endpoint = "leaguedashplayerstats"
+        params = {
+            "DateFrom": "",
+            "DateTo": "",
+            "GameScope": "",
+            "GameSegment": "",
+            "LastNGames": "0",
+            "LeagueID": "00",
+            "Location": "",
+            "MeasureType": "Base",
+            "Month": "0",
+            "OpponentTeamID": vs_team_id if vs_team_id else "0",
+            "Outcome": "",
+            "PORound": "0",
+            "PaceAdjust": "N",
+            "PerMode": "PerGame",
+            "Period": "0",
+            "PlayerExperience": "",
+            "PlayerPosition": "",
+            "PlusMinus": "N",
+            "Rank": "N",
+            "Season": season,
+            "SeasonSegment": "",
+            "SeasonType": season_type,
+            "ShotClockRange": "",
+            "StarterBench": "",
+            "TeamID": "0",
+            "TwoWay": "0",
+            "VsConference": "",
+            "VsDivision": ""
+        }
+        
+        try:
+            print(f"\nObteniendo estadísticas de jugadores para {season} ({season_type})...")
+            
+            # Intentar con un timeout más corto primero
+            for timeout in [20, 30, 45, 60]:
+                try:
+                    data = self._make_request(
+                        f"{self.base_url}{endpoint}",
+                        params=params,
+                        timeout=timeout
+                    )
+                    
+                    if data and 'resultSets' in data:
+                        print(f"✓ Datos obtenidos exitosamente con timeout de {timeout}s")
+                        break
+                    else:
+                        print(f"× Intento con timeout={timeout}s falló, probando con timeout más largo...")
+                except Exception as e:
+                    print(f"× Error con timeout={timeout}s: {str(e)}")
+                    if timeout == 60:  # último intento
+                        raise
+                    time.sleep(2)  # esperar antes del siguiente intento
+            
+            if not data or 'resultSets' not in data:
+                print("No se encontró la estructura esperada en los datos")
+                return pd.DataFrame()
+            
+            # Obtener los datos y encabezados
+            headers = data['resultSets'][0]['headers']
+            rows = data['resultSets'][0]['rowSet']
+            
+            # Verificar que hay datos
+            if not rows:
+                print("No se encontraron datos de jugadores")
+                return pd.DataFrame()
+            
+            # Crear DataFrame
+            df = pd.DataFrame(rows, columns=headers)
+            
+            return self._process_player_stats(df)
+            
+        except Exception as e:
+            print(f"Error al obtener estadísticas de jugadores: {str(e)}")
+            print("Intentando con configuración alternativa...")
+            
+            try:
+                # Intentar con una configuración más básica
+                alt_params = {
+                    "LeagueID": "00",
+                    "Season": season,
+                    "SeasonType": season_type,
+                    "PerMode": "PerGame"
+                }
+                
+                data = self._make_request(
+                    f"{self.base_url}{endpoint}",
+                    params=alt_params,
+                    timeout=60
+                )
+                
+                if data and 'resultSets' in data:
+                    df = pd.DataFrame(
+                        data['resultSets'][0]['rowSet'],
+                        columns=data['resultSets'][0]['headers']
+                    )
+                    return self._process_player_stats(df)
+                    
+            except Exception as e2:
+                print(f"Error en intento alternativo: {str(e2)}")
+            
+            return pd.DataFrame()
+
+    def get_team_stats(self, season: str = None, season_type: str = "Regular Season", vs_team_id: str = None) -> pd.DataFrame:
+        """Obtiene estadísticas de equipos."""
+        if season is None:
             season = self.current_season
             
-        endpoint = "leaguedashplayerstats"
+        if not self._validate_season(season):
+            print(f"Error: Temporada {season} inválida")
+            return pd.DataFrame()
+            
+        endpoint = "leaguedashteamstats"
         params = {
             "MeasureType": "Base",
             "PerMode": "PerGame",
-            "Season": season,
+            "Season": season,  # Usar la temporada proporcionada o la actual
             "SeasonType": season_type,
             "DateFrom": "",
             "DateTo": "",
@@ -126,133 +301,23 @@ class NBAStats:
         }
         
         try:
-            print(f"\nObteniendo estadísticas de jugadores para {season} ({season_type})...")
-            response = requests.get(
-                f"{self.base_url}{endpoint}",
-                headers=self.headers,
-                params=params,
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                print(f"Error en la respuesta: {response.text}")
-                return pd.DataFrame()
-            
-            data = response.json()
-            if 'resultSets' not in data:
-                print("No se encontró la estructura esperada en los datos")
-                return pd.DataFrame()
-            
-            df = pd.DataFrame(
-                data['resultSets'][0]['rowSet'],
-                columns=data['resultSets'][0]['headers']
-            )
-            
-            # Asegurarnos de que tenemos la columna de nombres
-            if 'PLAYER_NAME' not in df.columns:
-                # Intentar obtener nombres de jugadores
-                endpoint_players = "commonallplayers"
-                params_players = {
-                    "LeagueID": "00",
-                    "Season": season,
-                    "IsOnlyCurrentSeason": "1"
-                }
-                
-                response_players = requests.get(
-                    f"{self.base_url}{endpoint_players}",
-                    headers=self.headers,
-                    params=params_players,
-                    timeout=30
-                )
-                
-                if response_players.status_code == 200:
-                    data_players = response_players.json()
-                    if 'resultSets' in data_players:
-                        df_players = pd.DataFrame(
-                            data_players['resultSets'][0]['rowSet'],
-                            columns=data_players['resultSets'][0]['headers']
-                        )
-                        # Crear diccionario de mapeo ID -> Nombre
-                        player_names = dict(zip(df_players['PERSON_ID'], df_players['DISPLAY_FIRST_LAST']))
-                        # Añadir columna de nombres
-                        df['PLAYER_NAME'] = df['PLAYER_ID'].map(player_names)
-            
-            # Agregar columnas de temporada y tipo
-            df['SEASON'] = season
-            df['SEASON_TYPE'] = season_type
-            
-            return self._process_player_stats(df)
-            
-        except Exception as e:
-            print(f"Error inesperado: {str(e)}")
-            return pd.DataFrame()
-
-    def get_team_stats(self, season_type: str = "Regular Season", vs_team_id: str = None) -> pd.DataFrame:
-        """Obtiene estadísticas de equipos."""
-        endpoint = "leaguedashteamstats"
-        params = {
-            "MeasureType": "Base",
-            "PerMode": "PerGame",
-            "Season": "2023-24",  # Temporada actual
-            "SeasonType": "Regular Season",
-            "DateFrom": "",
-            "DateTo": "",
-            "GameScope": "",
-            "GameSegment": "",
-            "LastNGames": "0",
-            "LeagueID": "00",
-            "Location": "",
-            "Month": "0",
-            "OpponentTeamID": vs_team_id if vs_team_id else "0",
-            "Outcome": "",
-            "PORound": "0",
-            "PaceAdjust": "N",
-            "Period": "0",
-            "PlayerExperience": "",
-            "PlayerPosition": "",
-            "PlusMinus": "N",
-            "Rank": "N",
-            "SeasonSegment": "",
-            "ShotClockRange": "",
-            "StarterBench": "",
-            "TeamID": "0",
-            "VsConference": "",
-            "VsDivision": ""
-        }
-        
-        try:
             print("\nObteniendo estadísticas de equipos...")
-            response = requests.get(
+            response = self._make_request(
                 f"{self.base_url}{endpoint}",
-                headers=self.headers,
-                params=params,
-                timeout=30
+                params=params
             )
             
-            if response.status_code != 200:
-                print(f"Error en la respuesta: {response.text}")
-                return pd.DataFrame()
-            
-            try:
-                data = response.json()
-            except Exception as e:
-                print(f"Error al decodificar JSON: {str(e)}")
-                return pd.DataFrame()
-            
-            if 'resultSets' not in data:
+            if response.get('resultSets') is None:
                 print("No se encontró la estructura esperada en los datos")
                 return pd.DataFrame()
             
             df = pd.DataFrame(
-                data['resultSets'][0]['rowSet'],
-                columns=data['resultSets'][0]['headers']
+                response['resultSets'][0]['rowSet'],
+                columns=response['resultSets'][0]['headers']
             )
             
             return self._process_team_stats(df)
             
-        except requests.exceptions.RequestException as e:
-            print(f"Error en la solicitud HTTP: {str(e)}")
-            return pd.DataFrame()
         except Exception as e:
             print(f"Error inesperado: {str(e)}")
             return pd.DataFrame()
@@ -263,60 +328,96 @@ class NBAStats:
             print("DataFrame vacío en _process_player_stats")
             return df
             
-        print("\nProcesando estadísticas de jugadores")
-        print("Columnas antes del procesamiento:", list(df.columns))
-        print("Número de filas:", len(df))
-        print("Muestra de datos:", df.head(1).to_string())
-
-        # Asegurarnos de que tenemos una columna de nombres
-        if 'PLAYER_NAME' not in df.columns:
-            if 'PLAYER' in df.columns:
-                df['PLAYER_NAME'] = df['PLAYER']
-            elif 'PLAYER_ID' in df.columns:
-                print("Solo tenemos IDs de jugadores, necesitamos obtener los nombres")
-                return df
-        
-        # Asegurarnos de que los nombres sean strings
-        if 'PLAYER_NAME' in df.columns:
-            df['PLAYER_NAME'] = df['PLAYER_NAME'].astype(str)
-            # Limpiar nombres si es necesario
-            df['PLAYER_NAME'] = df['PLAYER_NAME'].apply(lambda x: x.strip() if isinstance(x, str) else x)
-        
-        # Rellenar valores nulos con 0 para estadísticas básicas
-        stats_to_fill = ['PTS', 'AST', 'REB', 'STL', 'BLK', 'TOV', 'FG3M']
-        for stat in stats_to_fill:
-            if stat in df.columns:
-                df[stat] = df[stat].fillna(0)
-        
-        # Crear estadísticas combinadas
         try:
-            # Puntos + Asistencias
-            if 'PTS' in df.columns and 'AST' in df.columns:
-                df['PTS_AST'] = df['PTS'] + df['AST']
+            print("\nProcesando estadísticas de jugadores")
+            print("Dimensiones del DataFrame:", df.shape)
+            print("Columnas antes del procesamiento:", df.columns.tolist())
             
-            # Puntos + Rebotes
-            if 'PTS' in df.columns and 'REB' in df.columns:
-                df['PTS_REB'] = df['PTS'] + df['REB']
+            # Verificar que tenemos las columnas necesarias
+            required_columns = ['PLAYER_ID', 'TEAM_ABBREVIATION']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                print(f"Faltan columnas requeridas: {missing_columns}")
+                return df
             
-            # Asistencias + Rebotes
-            if 'AST' in df.columns and 'REB' in df.columns:
-                df['AST_REB'] = df['AST'] + df['REB']
+            # Asegurarnos de que tenemos una columna de nombres
+            if 'PLAYER_NAME' not in df.columns:
+                print("Obteniendo nombres de jugadores...")
+                try:
+                    # Intentar obtener nombres de jugadores
+                    endpoint_players = "commonallplayers"
+                    params_players = {
+                        "LeagueID": "00",
+                        "Season": df['SEASON'].iloc[0] if 'SEASON' in df.columns else self.current_season,
+                        "IsOnlyCurrentSeason": "1"
+                    }
+                    
+                    response_players = self._make_request(
+                        f"{self.base_url}commonallplayers",
+                        params=params_players
+                    )
+                    
+                    if response_players.get('resultSets') is not None:
+                        df_players = pd.DataFrame(
+                            response_players['resultSets'][0]['rowSet'],
+                            columns=response_players['resultSets'][0]['headers']
+                        )
+                        # Crear diccionario de mapeo ID -> Nombre
+                        player_names = dict(zip(df_players['PERSON_ID'], df_players['DISPLAY_FIRST_LAST']))
+                        # Añadir columna de nombres
+                        df['PLAYER_NAME'] = df['PLAYER_ID'].map(player_names)
+                        print("Nombres de jugadores agregados correctamente")
+                except Exception as e:
+                    print(f"Error al obtener nombres de jugadores: {str(e)}")
             
-            # Puntos + Asistencias + Rebotes
-            if all(col in df.columns for col in ['PTS', 'AST', 'REB']):
-                df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
+            # Asegurarnos de que los nombres sean strings
+            if 'PLAYER_NAME' in df.columns:
+                df['PLAYER_NAME'] = df['PLAYER_NAME'].astype(str)
+                df['PLAYER_NAME'] = df['PLAYER_NAME'].apply(lambda x: x.strip() if isinstance(x, str) else x)
             
-            # Robos + Bloqueos
-            if 'STL' in df.columns and 'BLK' in df.columns:
-                df['STL_BLK'] = df['STL'] + df['BLK']
+            # Convertir columnas numéricas
+            numeric_columns = ['MIN', 'PTS', 'AST', 'REB', 'STL', 'BLK', 'TOV', 'FG3M']
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            print("\nEstadísticas combinadas creadas:")
-            print("Nuevas columnas:", [col for col in df.columns if '_' in col])
+            # Crear estadísticas combinadas
+            try:
+                # Puntos + Asistencias
+                if 'PTS' in df.columns and 'AST' in df.columns:
+                    df['PTS_AST'] = df['PTS'] + df['AST']
+                
+                # Puntos + Rebotes
+                if 'PTS' in df.columns and 'REB' in df.columns:
+                    df['PTS_REB'] = df['PTS'] + df['REB']
+                
+                # Asistencias + Rebotes
+                if 'AST' in df.columns and 'REB' in df.columns:
+                    df['AST_REB'] = df['AST'] + df['REB']
+                
+                # Puntos + Asistencias + Rebotes
+                if all(col in df.columns for col in ['PTS', 'AST', 'REB']):
+                    df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
+                
+                # Robos + Bloqueos
+                if 'STL' in df.columns and 'BLK' in df.columns:
+                    df['STL_BLK'] = df['STL'] + df['BLK']
+                
+                print("\nEstadísticas combinadas creadas:")
+                print("Nuevas columnas:", [col for col in df.columns if '_' in col])
+                
+            except Exception as e:
+                print(f"Error al crear estadísticas combinadas: {str(e)}")
+            
+            print("\nDimensiones finales del DataFrame:", df.shape)
+            return df
             
         except Exception as e:
-            print(f"Error al crear estadísticas combinadas: {str(e)}")
-            
-        return df
+            print(f"Error en _process_player_stats: {str(e)}")
+            import traceback
+            print("Traceback completo:")
+            print(traceback.format_exc())
+            return df
 
     def _process_team_stats(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa las estadísticas de equipos."""
@@ -509,74 +610,30 @@ class NBAStats:
             "SeasonSegment": "",
             "SeasonType": season_type,
             "TeamID": "0",
-            "PlayerID": player_id,
             "VsConference": "",
-            "VsDivision": ""
+            "VsDivision": "",
+            "PlayerID": player_id
         }
         
         try:
-            print(f"\nObteniendo logs de partidos para jugador {player_id} en {season} ({season_type})...")
-            response = requests.get(
-                f"{self.base_url}{endpoint}",
-                headers=self.headers,
-                params=params,
-                timeout=30
+            # Usar el nuevo método _make_request
+            data = self._make_request(
+                f"{self.base_url}/{endpoint}",
+                params=params
             )
             
-            if response.status_code != 200:
-                print(f"Error en la respuesta: {response.text}")
+            if not data or 'resultSets' not in data:
+                print(f"No se encontraron datos para el jugador {player_id}")
                 return pd.DataFrame()
-            
-            data = response.json()
-            if 'resultSets' not in data:
-                print("No se encontró la estructura esperada en los datos")
-                return pd.DataFrame()
-            
+                
             df = pd.DataFrame(
                 data['resultSets'][0]['rowSet'],
                 columns=data['resultSets'][0]['headers']
             )
             
-            # Agregar columnas de temporada y tipo
-            df['SEASON'] = season
-            df['SEASON_TYPE'] = season_type
-            
-            # Asegurarnos de que las columnas base sean numéricas
-            columnas_base = ['PTS', 'AST', 'REB', 'STL', 'BLK']
-            for col in columnas_base:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-            # Crear columnas compuestas
-            print("\nCreando columnas compuestas...")
-            
-            # Puntos + Asistencias
-            if all(col in df.columns for col in ['PTS', 'AST']):
-                df['PTS_AST'] = df['PTS'] + df['AST']
-                print("✓ Creada columna PTS_AST")
-            
-            # Puntos + Rebotes
-            if all(col in df.columns for col in ['PTS', 'REB']):
-                df['PTS_REB'] = df['PTS'] + df['REB']
-                print("✓ Creada columna PTS_REB")
-            
-            # Asistencias + Rebotes
-            if all(col in df.columns for col in ['AST', 'REB']):
-                df['AST_REB'] = df['AST'] + df['REB']
-                print("✓ Creada columna AST_REB")
-            
-            # Puntos + Asistencias + Rebotes
-            if all(col in df.columns for col in ['PTS', 'AST', 'REB']):
-                df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
-                print("✓ Creada columna PTS_AST_REB")
-            
-            # Robos + Bloqueos
-            if all(col in df.columns for col in ['STL', 'BLK']):
-                df['STL_BLK'] = df['STL'] + df['BLK']
-                print("✓ Creada columna STL_BLK")
-            
-            print("\nColumnas disponibles después de crear compuestas:")
-            print(df.columns.tolist())
+            # Agregar columnas de temporada y tipo usando arrays del tamaño correcto
+            df['SEASON'] = [season] * len(df)
+            df['SEASON_TYPE'] = [season_type] * len(df)
             
             return df
             
