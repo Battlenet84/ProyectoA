@@ -281,6 +281,40 @@ class NBAStats:
             df['PLAYER_NAME'] = df['PLAYER_NAME'].astype(str)
             # Limpiar nombres si es necesario
             df['PLAYER_NAME'] = df['PLAYER_NAME'].apply(lambda x: x.strip() if isinstance(x, str) else x)
+        
+        # Rellenar valores nulos con 0 para estadísticas básicas
+        stats_to_fill = ['PTS', 'AST', 'REB', 'STL', 'BLK', 'TOV', 'FG3M']
+        for stat in stats_to_fill:
+            if stat in df.columns:
+                df[stat] = df[stat].fillna(0)
+        
+        # Crear estadísticas combinadas
+        try:
+            # Puntos + Asistencias
+            if 'PTS' in df.columns and 'AST' in df.columns:
+                df['PTS_AST'] = df['PTS'] + df['AST']
+            
+            # Puntos + Rebotes
+            if 'PTS' in df.columns and 'REB' in df.columns:
+                df['PTS_REB'] = df['PTS'] + df['REB']
+            
+            # Asistencias + Rebotes
+            if 'AST' in df.columns and 'REB' in df.columns:
+                df['AST_REB'] = df['AST'] + df['REB']
+            
+            # Puntos + Asistencias + Rebotes
+            if all(col in df.columns for col in ['PTS', 'AST', 'REB']):
+                df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
+            
+            # Robos + Bloqueos
+            if 'STL' in df.columns and 'BLK' in df.columns:
+                df['STL_BLK'] = df['STL'] + df['BLK']
+            
+            print("\nEstadísticas combinadas creadas:")
+            print("Nuevas columnas:", [col for col in df.columns if '_' in col])
+            
+        except Exception as e:
+            print(f"Error al crear estadísticas combinadas: {str(e)}")
             
         return df
 
@@ -507,44 +541,139 @@ class NBAStats:
             df['SEASON'] = season
             df['SEASON_TYPE'] = season_type
             
+            # Asegurarnos de que las columnas base sean numéricas
+            columnas_base = ['PTS', 'AST', 'REB', 'STL', 'BLK']
+            for col in columnas_base:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
+            # Crear columnas compuestas
+            print("\nCreando columnas compuestas...")
+            
+            # Puntos + Asistencias
+            if all(col in df.columns for col in ['PTS', 'AST']):
+                df['PTS_AST'] = df['PTS'] + df['AST']
+                print("✓ Creada columna PTS_AST")
+            
+            # Puntos + Rebotes
+            if all(col in df.columns for col in ['PTS', 'REB']):
+                df['PTS_REB'] = df['PTS'] + df['REB']
+                print("✓ Creada columna PTS_REB")
+            
+            # Asistencias + Rebotes
+            if all(col in df.columns for col in ['AST', 'REB']):
+                df['AST_REB'] = df['AST'] + df['REB']
+                print("✓ Creada columna AST_REB")
+            
+            # Puntos + Asistencias + Rebotes
+            if all(col in df.columns for col in ['PTS', 'AST', 'REB']):
+                df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
+                print("✓ Creada columna PTS_AST_REB")
+            
+            # Robos + Bloqueos
+            if all(col in df.columns for col in ['STL', 'BLK']):
+                df['STL_BLK'] = df['STL'] + df['BLK']
+                print("✓ Creada columna STL_BLK")
+            
+            print("\nColumnas disponibles después de crear compuestas:")
+            print(df.columns.tolist())
+            
             return df
             
         except Exception as e:
             print(f"Error al obtener logs de partidos: {str(e)}")
             return pd.DataFrame()
 
-    def obtener_estadisticas_jugador_por_partido(self, equipo: str, jugador: str) -> pd.DataFrame:
+    def obtener_estadisticas_jugador_por_partido(self, equipo: str, jugador: str, temporada: Optional[str] = None, tipo_temporada: str = REGULAR_SEASON) -> pd.DataFrame:
         """
         Obtiene las estadísticas partido a partido de un jugador específico.
         
         Args:
             equipo: Nombre completo del equipo
             jugador: Nombre del jugador
+            temporada: Temporada (ej: "2023-24")
+            tipo_temporada: Tipo de temporada (Regular Season, Playoffs, etc)
         """
-        # Primero obtenemos el ID del equipo
-        team_id = self._get_team_id(equipo)
-        if not team_id:
-            print(f"No se encontró el ID para el equipo {equipo}")
+        print(f"\nBuscando estadísticas para {jugador} de {equipo}")
+        
+        # Primero obtenemos los datos del jugador
+        df_equipo = self.obtener_estadisticas_jugadores_equipo(
+            equipo=equipo,
+            temporada=temporada,
+            tipo_temporada=tipo_temporada
+        )
+        
+        if df_equipo.empty:
+            print("No se encontraron datos del equipo")
             return pd.DataFrame()
         
-        # Obtenemos los logs de partidos
-        df = self.get_player_game_logs(player_id=team_id)
+        # Buscar al jugador
+        if 'PLAYER_NAME' not in df_equipo.columns:
+            print("No se encontró la columna de nombres de jugadores")
+            return pd.DataFrame()
+        
+        df_jugador = df_equipo[df_equipo['PLAYER_NAME'] == jugador]
+        if df_jugador.empty:
+            print(f"No se encontró al jugador {jugador}")
+            return pd.DataFrame()
+        
+        # Obtener el ID del jugador
+        if 'PLAYER_ID' not in df_jugador.columns:
+            print("No se encontró el ID del jugador")
+            return pd.DataFrame()
+        
+        player_id = str(df_jugador['PLAYER_ID'].iloc[0])
+        print(f"ID del jugador encontrado: {player_id}")
+        
+        # Obtener los logs de partidos
+        df = self.get_player_game_logs(
+            player_id=player_id,
+            season=temporada,
+            season_type=tipo_temporada
+        )
         
         if df.empty:
+            print("No se encontraron logs de partidos")
             return df
         
-        # Buscamos al jugador específico
-        player_name_col = None
-        for col in df.columns:
-            if 'PLAYER_NAME' in col:
-                player_name_col = col
-                break
+        # Asegurarnos de que las columnas base sean numéricas
+        columnas_base = ['PTS', 'AST', 'REB', 'STL', 'BLK']
+        for col in columnas_base:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         
-        if not player_name_col:
-            print("No se encontró la columna con nombres de jugadores")
-            return pd.DataFrame()
+        # Crear columnas compuestas si no existen
+        print("\nVerificando columnas compuestas...")
         
-        return df[df[player_name_col] == jugador]
+        # Puntos + Asistencias
+        if 'PTS_AST' not in df.columns and all(col in df.columns for col in ['PTS', 'AST']):
+            df['PTS_AST'] = df['PTS'] + df['AST']
+            print("✓ Creada columna PTS_AST")
+        
+        # Puntos + Rebotes
+        if 'PTS_REB' not in df.columns and all(col in df.columns for col in ['PTS', 'REB']):
+            df['PTS_REB'] = df['PTS'] + df['REB']
+            print("✓ Creada columna PTS_REB")
+        
+        # Asistencias + Rebotes
+        if 'AST_REB' not in df.columns and all(col in df.columns for col in ['AST', 'REB']):
+            df['AST_REB'] = df['AST'] + df['REB']
+            print("✓ Creada columna AST_REB")
+        
+        # Puntos + Asistencias + Rebotes
+        if 'PTS_AST_REB' not in df.columns and all(col in df.columns for col in ['PTS', 'AST', 'REB']):
+            df['PTS_AST_REB'] = df['PTS'] + df['AST'] + df['REB']
+            print("✓ Creada columna PTS_AST_REB")
+        
+        # Robos + Bloqueos
+        if 'STL_BLK' not in df.columns and all(col in df.columns for col in ['STL', 'BLK']):
+            df['STL_BLK'] = df['STL'] + df['BLK']
+            print("✓ Creada columna STL_BLK")
+        
+        print("\nColumnas disponibles después de procesar:")
+        print(df.columns.tolist())
+        
+        return df
 
 def print_player_stats(df: pd.DataFrame, player_name: Optional[str] = None):
     """Imprime estadísticas de jugadores."""

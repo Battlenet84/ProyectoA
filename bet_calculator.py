@@ -117,29 +117,45 @@ def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: floa
                 print(f"No hay datos para partidos {filtro_local.lower()}")
                 return 0.0, 0, 0
     
-    # Si columna es una lista, calcular la estadística combinada
-    if isinstance(columna, list):
-        try:
-            valores = calcular_estadistica_combinada(df, columna)
-        except ValueError as e:
-            print(str(e))
-            return 0.0, 0, 0
-    else:
-        # Verificar que tenemos la columna necesaria
-        if columna not in df.columns:
-            print(f"No se encontró la columna {columna}")
-            return 0.0, 0, 0
-        valores = df[columna]
+    # Verificar que la columna existe
+    if columna not in df.columns:
+        print(f"No se encontró la columna {columna}")
+        return 0.0, 0, 0
     
-    # Contar partidos totales y veces que cumplió la condición
-    total_partidos = len(df)
-    if es_over:
-        veces_cumplido = len(valores[valores > umbral])  # Estrictamente mayor para over
+    # Asegurarnos de que no haya valores nulos
+    # Para estadísticas acumulativas (puntos, rebotes, etc.), los nulos son 0
+    # Para porcentajes, los nulos se eliminan
+    if columna in ['PTS', 'AST', 'REB', 'STL', 'BLK', 'TOV', 'FG3M', 
+                   'PTS_AST', 'PTS_REB', 'AST_REB', 'PTS_AST_REB', 'STL_BLK']:
+        df[columna] = df[columna].fillna(0)
     else:
-        veces_cumplido = len(valores[valores < umbral])  # Estrictamente menor para under
+        df = df.dropna(subset=[columna])
     
+    # Convertir la columna a numérica si no lo es
+    try:
+        df[columna] = pd.to_numeric(df[columna], errors='coerce')
+        df = df.dropna(subset=[columna])  # Eliminar cualquier valor que no se pudo convertir
+    except Exception as e:
+        print(f"Error al convertir valores a numéricos: {str(e)}")
+        return 0.0, 0, 0
+    
+    # Obtener los valores válidos
+    valores = df[columna]
+    
+    # Verificar que tenemos datos
+    total_partidos = len(valores)
     if total_partidos == 0:
-        print("No hay datos de partidos")
+        print("No hay datos válidos para analizar")
+        return 0.0, 0, 0
+    
+    # Calcular veces que cumplió la condición
+    try:
+        if es_over:
+            veces_cumplido = len(valores[valores > umbral])  # Estrictamente mayor para over
+        else:
+            veces_cumplido = len(valores[valores < umbral])  # Estrictamente menor para under
+    except Exception as e:
+        print(f"Error al comparar valores: {str(e)}")
         return 0.0, 0, 0
     
     probabilidad = veces_cumplido / total_partidos
@@ -248,25 +264,35 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
     print(f"Filtro de localía: {filtro_local}")
     
     # Obtener datos generales primero
-    datos = stats.obtener_estadisticas_jugadores_equipo(
-        equipo=equipo,
-        rivales=None,
-        temporada=temporada,
-        tipo_temporada=tipo_temporada
-    )
+    df_jugadores = pd.DataFrame()
     
-    if datos.empty:
+    # Si tipo_temporada es una lista, obtener datos para cada tipo
+    tipos_temporada = tipo_temporada if isinstance(tipo_temporada, list) else [tipo_temporada]
+    
+    for tipo in tipos_temporada:
+        df_temp = stats.obtener_estadisticas_jugadores_equipo(
+            equipo=equipo,
+            rivales=None,
+            temporada=temporada,
+            tipo_temporada=tipo
+        )
+        
+        if not df_temp.empty:
+            df_temp['TIPO_TEMPORADA'] = tipo
+            df_jugadores = pd.concat([df_jugadores, df_temp], ignore_index=True)
+    
+    if df_jugadores.empty:
         return "No hay datos disponibles para este equipo."
     
     # Verificar que tenemos las columnas necesarias
-    if 'PLAYER_NAME' not in datos.columns or 'PLAYER_ID' not in datos.columns:
+    if 'PLAYER_NAME' not in df_jugadores.columns or 'PLAYER_ID' not in df_jugadores.columns:
         return "Error: No se encontraron las columnas PLAYER_NAME o PLAYER_ID en los datos."
     
     # Asegurarnos que los nombres sean strings y estén limpios
-    datos['PLAYER_NAME'] = datos['PLAYER_NAME'].astype(str).apply(lambda x: x.strip())
+    df_jugadores['PLAYER_NAME'] = df_jugadores['PLAYER_NAME'].astype(str).apply(lambda x: x.strip())
     
     print(f"\nJugadores disponibles en {equipo}:")
-    jugadores = sorted(datos['PLAYER_NAME'].unique().tolist())
+    jugadores = sorted(df_jugadores['PLAYER_NAME'].unique().tolist())
     for idx, nombre in enumerate(jugadores, 1):
         print(f"{idx}. {nombre}")
     
@@ -274,7 +300,7 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
     jugador = str(jugador).strip()
     
     # Buscar coincidencia exacta primero
-    datos_jugador = datos[datos['PLAYER_NAME'] == jugador]
+    datos_jugador = df_jugadores[df_jugadores['PLAYER_NAME'] == jugador]
     
     # Si no hay coincidencia exacta, buscar coincidencia parcial
     if datos_jugador.empty:
@@ -282,7 +308,7 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
         for nombre_completo in jugadores:
             if jugador.lower() in nombre_completo.lower():
                 print(f"¿Querías decir '{nombre_completo}'?")
-                datos_jugador = datos[datos['PLAYER_NAME'] == nombre_completo]
+                datos_jugador = df_jugadores[df_jugadores['PLAYER_NAME'] == nombre_completo]
                 jugador = nombre_completo
                 break
     
@@ -292,54 +318,127 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
     # Obtener el ID del jugador
     player_id = str(datos_jugador['PLAYER_ID'].iloc[0])
     
-    # Obtener datos partido a partido
-    datos_partidos = stats.get_player_game_logs(
-        player_id=player_id,
-        season=temporada,
-        season_type=tipo_temporada
-    )
+    # Inicializar DataFrame para acumular datos partido a partido
+    datos_partidos = pd.DataFrame()
+    
+    # Obtener datos partido a partido para cada tipo de temporada
+    for tipo in tipos_temporada:
+        df_temp = stats.get_player_game_logs(
+            player_id=player_id,
+            season=temporada,
+            season_type=tipo
+        )
+        
+        if not df_temp.empty:
+            df_temp['TIPO_TEMPORADA'] = tipo
+            datos_partidos = pd.concat([datos_partidos, df_temp], ignore_index=True)
     
     if datos_partidos.empty:
         return f"No se encontraron datos partido a partido para {jugador}"
     
     # Mapeo de nombres de estadísticas para datos partido a partido
     stat_mapping = {
+        # Estadísticas básicas
         'Puntos': 'PTS',
         'Asistencias': 'AST',
         'Rebotes': 'REB',
         'Triples': 'FG3M',
         'Robos': 'STL',
         'Tapones': 'BLK',
+        'Bloqueos': 'BLK',
         'Pérdidas': 'TOV',
-        # Props combinadas
-        'Puntos + Asistencias': ['PTS', 'AST'],
-        'Puntos + Rebotes': ['PTS', 'REB'],
-        'Asistencias + Rebotes': ['AST', 'REB'],
-        'Puntos + Asistencias + Rebotes': ['PTS', 'AST', 'REB'],
-        'Tapones + Robos': ['BLK', 'STL'],
-        # Mantener también las versiones en inglés por compatibilidad
+        'Pérdidas de balón': 'TOV',
+        
+        # Props combinadas - versión española
+        'Puntos + Asistencias': 'PTS_AST',
+        'Puntos y Asistencias': 'PTS_AST',
+        'Puntos más Asistencias': 'PTS_AST',
+        
+        'Puntos + Rebotes': 'PTS_REB',
+        'Puntos y Rebotes': 'PTS_REB',
+        'Puntos más Rebotes': 'PTS_REB',
+        
+        'Asistencias + Rebotes': 'AST_REB',
+        'Asistencias y Rebotes': 'AST_REB',
+        'Asistencias más Rebotes': 'AST_REB',
+        
+        'Puntos + Asistencias + Rebotes': 'PTS_AST_REB',
+        'Puntos, Asistencias y Rebotes': 'PTS_AST_REB',
+        'Puntos más Asistencias más Rebotes': 'PTS_AST_REB',
+        
+        'Tapones + Robos': 'STL_BLK',
+        'Tapones y Robos': 'STL_BLK',
+        'Tapones más Robos': 'STL_BLK',
+        'Bloqueos + Robos': 'STL_BLK',
+        'Bloqueos y Robos': 'STL_BLK',
+        'Bloqueos más Robos': 'STL_BLK',
+        
+        # Props combinadas - versión inglesa
+        'Points': 'PTS',
+        'Assists': 'AST',
+        'Rebounds': 'REB',
+        'Threes': 'FG3M',
+        'Steals': 'STL',
+        'Blocks': 'BLK',
+        'Turnovers': 'TOV',
+        
+        'Points + Assists': 'PTS_AST',
+        'Points and Assists': 'PTS_AST',
+        'Points & Assists': 'PTS_AST',
+        
+        'Points + Rebounds': 'PTS_REB',
+        'Points and Rebounds': 'PTS_REB',
+        'Points & Rebounds': 'PTS_REB',
+        
+        'Assists + Rebounds': 'AST_REB',
+        'Assists and Rebounds': 'AST_REB',
+        'Assists & Rebounds': 'AST_REB',
+        
+        'Points + Assists + Rebounds': 'PTS_AST_REB',
+        'Points, Assists and Rebounds': 'PTS_AST_REB',
+        'Points, Assists & Rebounds': 'PTS_AST_REB',
+        
+        'Blocks + Steals': 'STL_BLK',
+        'Blocks and Steals': 'STL_BLK',
+        'Blocks & Steals': 'STL_BLK',
+        
+        # Versiones cortas
         'PTS': 'PTS',
         'AST': 'AST',
         'REB': 'REB',
         'FG3M': 'FG3M',
         'STL': 'STL',
         'BLK': 'BLK',
-        'TOV': 'TOV'
+        'TOV': 'TOV',
+        'PTS+AST': 'PTS_AST',
+        'PTS_AST': 'PTS_AST',
+        'PTS+REB': 'PTS_REB',
+        'PTS_REB': 'PTS_REB',
+        'AST+REB': 'AST_REB',
+        'AST_REB': 'AST_REB',
+        'PTS+AST+REB': 'PTS_AST_REB',
+        'PTS_AST_REB': 'PTS_AST_REB',
+        'STL+BLK': 'STL_BLK',
+        'STL_BLK': 'STL_BLK'
     }
-    
+
     # Buscar la columna o columnas correctas para la estadística
     stat_columns = stat_mapping.get(prop)
     if not stat_columns:
-        columnas_disponibles = datos_partidos.columns.tolist()
-        return f"No se encontró la columna para la estadística {prop}. Columnas disponibles: {columnas_disponibles}"
+        # Intentar normalizar el nombre de la prop
+        prop_normalizada = prop.replace(' + ', '_').replace('+', '_').replace(' ', '_').upper()
+        stat_columns = stat_mapping.get(prop_normalizada)
+        
+        if not stat_columns:
+            columnas_disponibles = datos_partidos.columns.tolist()
+            return f"No se encontró la columna para la estadística {prop}. Columnas disponibles: {columnas_disponibles}"
     
-    # Si es una prop combinada, verificar que todas las columnas existen
-    if isinstance(stat_columns, list):
-        for col in stat_columns:
-            if col not in datos_partidos.columns:
-                return f"No se encontró la columna {col} necesaria para {prop}"
-    elif stat_columns not in datos_partidos.columns:
-        return f"No se encontró la columna {stat_columns}"
+    # Verificar que la columna existe
+    if stat_columns not in datos_partidos.columns:
+        return f"No se encontró la columna {stat_columns} necesaria para {prop}"
+    
+    # Asegurarnos de que los valores nulos sean 0
+    datos_partidos[stat_columns] = datos_partidos[stat_columns].fillna(0)
     
     probabilidad, veces_cumplido, total_partidos = calcular_probabilidad_historica(
         datos_partidos, 
@@ -349,15 +448,32 @@ def evaluar_prop_bet(stats: NBAStats, equipo: str, jugador: str,
         filtro_local
     )
     
+    if probabilidad == 0 and total_partidos == 0:
+        return f"No hay suficientes datos para analizar {prop}"
+    
     # Obtener el promedio
-    if isinstance(stat_columns, list):
-        promedio = calcular_estadistica_combinada(datos_partidos, stat_columns).mean()
-    else:
-        promedio = datos_partidos[stat_columns].mean()
+    promedio = datos_partidos[stat_columns].mean()
     
     # Valor esperado simple: probabilidad * ganancia - (1-probabilidad) * pérdida
     # Donde ganancia = cuota - 1, y pérdida = 1
     valor_esperado = probabilidad * (cuota - 1) - (1 - probabilidad) * 1
+    
+    # Obtener desglose por tipo de temporada
+    desglose = ""
+    for tipo in tipos_temporada:
+        df_tipo = datos_partidos[datos_partidos['TIPO_TEMPORADA'] == tipo]
+        if not df_tipo.empty:
+            prob_tipo, cumplido_tipo, total_tipo = calcular_probabilidad_historica(
+                df_tipo, 
+                stat_columns, 
+                umbral,
+                es_over,
+                filtro_local
+            )
+            promedio_tipo = df_tipo[stat_columns].mean()
+            desglose += f"\n{tipo}:"
+            desglose += f"\n- Promedio: {promedio_tipo:.1f}"
+            desglose += f"\n- Cumplió: {cumplido_tipo} de {total_tipo} ({prob_tipo*100:.1f}%)"
     
     analisis = f"""
 Análisis de la Apuesta:
@@ -367,7 +483,7 @@ Estadística: {prop}
 Tipo de Apuesta: {'Más' if es_over else 'Menos'} de {umbral}
 Cuota: {cuota}
 Temporada: {temporada if temporada else 'Actual'}
-Tipo: {tipo_temporada}
+Tipos: {', '.join(tipos_temporada)}
 Filtro: {filtro_local}
 
 Datos Históricos:
@@ -376,6 +492,9 @@ Promedio por partido: {promedio:.1f}
 Partidos jugados: {total_partidos}
 Veces que {'superó' if es_over else 'quedó bajo'} {umbral}: {veces_cumplido} de {total_partidos} ({(veces_cumplido/total_partidos)*100:.1f}%)
 Probabilidad histórica: {probabilidad:.1%}
+
+Desglose por Tipo de Temporada:
+{desglose}
 
 Análisis de Valor:
 ----------------
