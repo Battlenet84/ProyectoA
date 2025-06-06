@@ -2,9 +2,47 @@ import streamlit as st
 from nba_stats import NBAStats
 from bet_calculator import evaluar_prop_bet
 from bet_scraper import BetScraper
-from odds_api import ExcelOddsLoader
+from odds_api import GoogleSheetsOddsLoader
 import pandas as pd
 import re  # Agregar importación del módulo re para expresiones regulares
+
+# Cargar apuestas desde Google Sheets
+SPREADSHEET_ID = "1VTn80vGKu9MbAHZoV9UoVKYyPeVkh-6_N6DMNQInKQk"
+
+# Inicializar el cargador de cuotas desde Google Sheets si no existe en la sesión
+if 'sheets_loader' not in st.session_state:
+    st.session_state.sheets_loader = GoogleSheetsOddsLoader(SPREADSHEET_ID)
+
+# Cargar las cuotas si no están en la sesión
+if 'odds_data' not in st.session_state:
+    try:
+        st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
+        # Crear DataFrame para mostrar todas las cuotas
+        odds_data = []
+        for jugador, props in st.session_state.odds_data.items():
+            for prop in props:
+                # Agregar over si existe
+                if prop['over_line'] is not None and prop['over_odds'] is not None:
+                    odds_data.append({
+                        'Jugador': jugador,
+                        'Prop': prop['prop_name'],
+                        'Línea': prop['over_line'],
+                        'Tipo': 'Más de',
+                        'Cuota': prop['over_odds']
+                    })
+                # Agregar under si existe
+                if prop['under_line'] is not None and prop['under_odds'] is not None:
+                    odds_data.append({
+                        'Jugador': jugador,
+                        'Prop': prop['prop_name'],
+                        'Línea': prop['under_line'],
+                        'Tipo': 'Menos de',
+                        'Cuota': prop['under_odds']
+                    })
+        if odds_data:
+            st.session_state.odds_data_df = pd.DataFrame(odds_data)
+    except Exception as e:
+        print(f"Error al cargar cuotas de Google Sheets: {str(e)}")
 
 # Mapeo de nombres de props a columnas
 prop_mapping = {
@@ -602,7 +640,7 @@ if equipo_sel:
                                     f.write(uploaded_file.getvalue())
                                 
                                 # Cargar las cuotas
-                                loader = ExcelOddsLoader("temp_odds.xlsx")
+                                loader = GoogleSheetsOddsLoader("temp_odds.xlsx")
                                 # Pasar el parámetro de encabezados al loader
                                 props_por_jugador = loader.load_odds(tiene_encabezados=(tiene_encabezado == "Con encabezados"))
                                 
@@ -696,8 +734,15 @@ if equipo_sel:
             try:
                 # Verificar si hay datos cargados
                 if 'odds_data' not in st.session_state:
-                    st.info("👆 Primero carga un archivo Excel con cuotas en la pestaña 'Cargar Excel'")
-                    st.stop()
+                    # Intentar cargar los datos de Google Sheets
+                    try:
+                        st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
+                        if not st.session_state.odds_data:
+                            st.info("No hay apuestas disponibles en Google Sheets.")
+                            st.stop()
+                    except Exception as e:
+                        st.error(f"Error al cargar datos de Google Sheets: {str(e)}")
+                        st.stop()
                 
                 # Mostrar datos cargados
                 if 'odds_data_df' in st.session_state:
@@ -705,8 +750,68 @@ if equipo_sel:
                     st.data_editor(
                         st.session_state.odds_data_df,
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
+                        column_config={
+                            "Jugador": st.column_config.TextColumn(
+                                "Jugador",
+                                width="medium",
+                                help="Nombre del jugador"
+                            ),
+                            "Prop": st.column_config.TextColumn(
+                                "Prop",
+                                width="medium",
+                                help="Tipo de prop"
+                            ),
+                            "Línea": st.column_config.NumberColumn(
+                                "Línea",
+                                format="%.1f",
+                                help="Valor de la línea"
+                            ),
+                            "Tipo": st.column_config.TextColumn(
+                                "Tipo",
+                                width="small",
+                                help="Más de/Menos de"
+                            ),
+                            "Cuota": st.column_config.NumberColumn(
+                                "Cuota",
+                                format="%.2f",
+                                help="Cuota ofrecida"
+                            )
+                        }
                     )
+                
+                # Botón para recargar datos
+                col1, col2, col3 = st.columns([1,2,1])
+                with col2:
+                    if st.button("🔄 Recargar Datos", key='recargar_sheets', use_container_width=True):
+                        with st.spinner("Recargando datos de Google Sheets..."):
+                            st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
+                            # Actualizar DataFrame
+                            odds_data = []
+                            for jugador, props in st.session_state.odds_data.items():
+                                for prop in props:
+                                    if prop['over_line'] is not None and prop['over_odds'] is not None:
+                                        odds_data.append({
+                                            'Jugador': jugador,
+                                            'Prop': prop['prop_name'],
+                                            'Línea': prop['over_line'],
+                                            'Tipo': 'Más de',
+                                            'Cuota': prop['over_odds']
+                                        })
+                                    if prop['under_line'] is not None and prop['under_odds'] is not None:
+                                        odds_data.append({
+                                            'Jugador': jugador,
+                                            'Prop': prop['prop_name'],
+                                            'Línea': prop['under_line'],
+                                            'Tipo': 'Menos de',
+                                            'Cuota': prop['under_odds']
+                                        })
+                            if odds_data:
+                                st.session_state.odds_data_df = pd.DataFrame(odds_data)
+                                st.success("✅ Datos recargados correctamente")
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ No se encontraron datos nuevos")
                 
                 # Botón para analizar
                 if st.button("🔍 Analizar Todas las Props", key='analizar_props', use_container_width=True):
