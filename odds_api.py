@@ -100,43 +100,6 @@ class GoogleSheetsOddsLoader:
             logger.error(f"Error al cargar las credenciales: {str(e)}")
             raise
         
-    def _process_player_name(self, sheet_name: str) -> str:
-        """
-        Procesa el nombre de la hoja para obtener el nombre completo del jugador.
-        Formato esperado: 'Apellido, Nombre', 'Apellido_Nombre', 'Nombre Apellido' o cualquier otro formato
-        
-        Args:
-            sheet_name: Nombre de la hoja del Google Sheets
-            
-        Returns:
-            str: Nombre completo del jugador formateado
-        """
-        # Limpiar el nombre
-        name = sheet_name.strip()
-        
-        # Si el nombre usa coma para separar
-        if ',' in name:
-            parts = name.split(',')
-            if len(parts) == 2:
-                last_name = parts[0].strip()
-                first_name = parts[1].strip()
-                return f"{first_name} {last_name}"  # Retornar en formato "Nombre Apellido"
-        
-        # Si el nombre usa guión bajo para separar
-        elif '_' in name:
-            parts = name.split('_')
-            if len(parts) >= 2:
-                last_name = parts[0].strip()
-                first_name = ' '.join(parts[1:]).strip()
-                return f"{first_name} {last_name}"  # Retornar en formato "Nombre Apellido"
-        
-        # Si el nombre ya está en formato "Nombre Apellido"
-        elif ' ' in name:
-            return name
-        
-        # Si no hay separador, devolver el nombre tal cual
-        return name
-        
     def _convert_to_float(self, value) -> Optional[float]:
         """
         Convierte un valor a float, manejando diferentes formatos de números.
@@ -179,6 +142,11 @@ class GoogleSheetsOddsLoader:
     def load_odds(self) -> Dict[str, List[Dict]]:
         """
         Carga y procesa las cuotas desde Google Sheets.
+        El formato esperado es:
+        - Cada hoja representa un equipo
+        - Cada jugador tiene una tabla de 3 columnas
+        - Las tablas están separadas por una columna vacía
+        - El nombre del jugador está en la primera fila de su tabla
                              
         Returns:
             Dict[str, List[Dict]]: Diccionario con nombres de jugadores como claves y lista de props como valores
@@ -204,17 +172,12 @@ class GoogleSheetsOddsLoader:
             
             for sheet in sheets:
                 sheet_name = sheet['properties']['title']
-                logger.info(f"\nProcesando hoja: {sheet_name}")
+                logger.info(f"\nProcesando hoja (equipo): {sheet_name}")
                 
-                # Procesar el nombre del jugador
-                nombre_jugador = self._process_player_name(sheet_name)
-                logger.info(f"Nombre procesado: {nombre_jugador}")
-                
-                # Obtener los datos de la hoja
-                logger.info(f"Obteniendo datos de la hoja {sheet_name}...")
+                # Obtener los datos de la hoja completa
                 result = service.spreadsheets().values().get(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"{sheet_name}!A:C"
+                    range=f"{sheet_name}"
                 ).execute()
                 values = result.get('values', [])
                 
@@ -222,72 +185,72 @@ class GoogleSheetsOddsLoader:
                     logger.warning(f"No se encontraron datos en la hoja {sheet_name}")
                     continue
                 
-                logger.info(f"Filas obtenidas: {len(values)}")
+                # Convertir los valores a un DataFrame para facilitar el procesamiento
+                df = pd.DataFrame(values)
                 
-                props_list = []
-                current_prop = None
-                
-                logger.info("\nProcesando filas...")
-                
-                i = 0
-                while i < len(values):
+                # Procesar las tablas horizontalmente
+                col = 0
+                while col < len(df.columns):
                     try:
-                        row = values[i]
-                        # Asegurarse de que la fila tiene 3 columnas
-                        while len(row) < 3:
-                            row.append('')
-                            
-                        logger.debug(f"Fila {i+1}: {row}")
+                        # Verificar si hay datos en esta columna
+                        if col >= len(df.columns) or pd.isna(df.iloc[0, col]) or df.iloc[0, col] == '':
+                            col += 1
+                            continue
                         
-                        # Si la primera columna no está vacía, es una nueva prop
-                        prop_name = row[0].strip()
-                        if prop_name:
-                            logger.info(f"\nNueva prop encontrada: {prop_name}")
-                            
-                            # Procesar líneas y cuotas
-                            over_line = self._convert_to_float(row[1])
-                            under_line = self._convert_to_float(row[2])
-                            over_odds = None
-                            under_odds = None
-                            
-                            # Si hay siguiente fila, intentar obtener las cuotas
-                            if i + 1 < len(values):
-                                next_row = values[i + 1]
-                                while len(next_row) < 3:
-                                    next_row.append('')
-                                    
-                                over_odds = self._convert_to_float(next_row[1])
-                                under_odds = self._convert_to_float(next_row[2])
+                        # Obtener el nombre del jugador (primera fila de la tabla)
+                        nombre_jugador = str(df.iloc[0, col]).strip()
+                        logger.info(f"\nProcesando jugador: {nombre_jugador}")
+                        
+                        # Extraer las tres columnas de la tabla del jugador
+                        if col + 2 >= len(df.columns):
+                            logger.warning(f"No hay suficientes columnas para la tabla de {nombre_jugador}")
+                            break
+                        
+                        tabla_jugador = df.iloc[1:, col:col+3].copy()
+                        tabla_jugador.columns = ['prop_name', 'line', 'odds']
+                        
+                        # Procesar las props del jugador
+                        props_list = []
+                        for idx in range(0, len(tabla_jugador), 2):
+                            if idx + 1 >= len(tabla_jugador):
+                                break
                                 
-                            # Crear la prop solo si tiene al menos una línea válida
-                            if over_line is not None or under_line is not None:
-                                current_prop = {
-                                    'prop_name': prop_name,
-                                    'over_line': over_line,
-                                    'under_line': under_line,
-                                    'over_odds': over_odds,
-                                    'under_odds': under_odds
-                                }
-                                props_list.append(current_prop)
-                                logger.info("✓ Prop agregada correctamente")
-                                logger.info(f"   Over: {over_line} @ {over_odds}")
-                                logger.info(f"   Under: {under_line} @ {under_odds}")
-                            else:
-                                logger.warning("✗ Prop ignorada por falta de líneas válidas")
+                            prop_row = tabla_jugador.iloc[idx]
+                            odds_row = tabla_jugador.iloc[idx + 1] if idx + 1 < len(tabla_jugador) else None
                             
-                            i += 2  # Avanzar dos filas (prop y cuotas)
-                        else:
-                            i += 1  # Avanzar una fila
-                            
+                            if pd.notna(prop_row['prop_name']) and prop_row['prop_name'].strip():
+                                prop_name = prop_row['prop_name'].strip()
+                                
+                                # Procesar líneas y cuotas
+                                over_line = self._convert_to_float(prop_row['line'])
+                                under_line = self._convert_to_float(prop_row['odds'])
+                                over_odds = self._convert_to_float(odds_row['line']) if odds_row is not None else None
+                                under_odds = self._convert_to_float(odds_row['odds']) if odds_row is not None else None
+                                
+                                if over_line is not None or under_line is not None:
+                                    props_list.append({
+                                        'prop_name': prop_name,
+                                        'over_line': over_line,
+                                        'under_line': under_line,
+                                        'over_odds': over_odds,
+                                        'under_odds': under_odds
+                                    })
+                                    logger.info(f"✓ Prop agregada: {prop_name}")
+                                    logger.info(f"   Over: {over_line} @ {over_odds}")
+                                    logger.info(f"   Under: {under_line} @ {under_odds}")
+                        
+                        # Guardar las props del jugador
+                        if props_list:
+                            props_por_jugador[nombre_jugador] = props_list
+                            logger.info(f"✓ {len(props_list)} props guardadas para {nombre_jugador}")
+                        
+                        # Avanzar a la siguiente tabla (saltar 4 columnas: 3 de la tabla + 1 de separación)
+                        col += 4
+                        
                     except Exception as e:
-                        logger.error(f"❌ Error procesando fila {i+1}: {str(e)}")
-                        i += 1
+                        logger.error(f"Error procesando tabla en columna {col}: {str(e)}")
+                        col += 1
                         continue
-                
-                # Si encontramos props en esta hoja, las guardamos con el nombre del jugador
-                if props_list:
-                    props_por_jugador[nombre_jugador] = props_list
-                    logger.info(f"\nProps guardadas para {nombre_jugador}: {len(props_list)}")
             
             logger.info(f"\nResumen del procesamiento:")
             logger.info(f"Total de jugadores: {len(props_por_jugador)}")
