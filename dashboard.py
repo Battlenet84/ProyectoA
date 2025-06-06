@@ -761,172 +761,179 @@ if equipo_sel:
                             else:
                                 st.warning("No se encontraron credenciales en Streamlit Secrets")
                 
-                # Botón para recargar datos
-                if st.button("🔄 Recargar Datos", key="reload_odds"):
-                    with st.spinner("Cargando datos..."):
+                # Botón para recargar y analizar todas las props
+                if st.button("🔄 Recargar y Analizar Props", key="reload_analyze_odds"):
+                    with st.spinner("Cargando y analizando props..."):
                         try:
+                            # Cargar datos
                             st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
-                            # Crear DataFrame para mostrar todas las cuotas
-                            odds_data = []
+                            
+                            # Lista para almacenar todos los análisis
+                            analisis_props = []
+                            
+                            # Procesar cada prop
                             for jugador, props in st.session_state.odds_data.items():
+                                # Extraer nombre del jugador (antes de la coma si existe)
+                                nombre_jugador = jugador.split(',')[0] if ',' in jugador else jugador
+                                
                                 for prop in props:
-                                    # Agregar over si existe
+                                    # Analizar over si existe
                                     if prop['over_line'] is not None and prop['over_odds'] is not None:
-                                        odds_data.append({
-                                            'Jugador': jugador,
-                                            'Prop': prop['prop_name'],
-                                            'Línea': prop['over_line'],
-                                            'Tipo': 'Más de',
-                                            'Cuota': prop['over_odds']
-                                        })
-                                    # Agregar under si existe
+                                        try:
+                                            resultado = evaluar_prop_bet(
+                                                stats=nba,
+                                                equipo=equipo_sel,
+                                                jugador=nombre_jugador,
+                                                prop=prop['prop_name'],
+                                                umbral=prop['over_line'],
+                                                cuota=prop['over_odds'],
+                                                temporada=temporada_sel,
+                                                tipo_temporada=tipos_temporada_sel,
+                                                es_over=True
+                                            )
+                                            
+                                            # Extraer valor esperado y probabilidad
+                                            valor_esperado = None
+                                            probabilidad = None
+                                            for linea in resultado.split('\n'):
+                                                if 'Valor esperado por unidad apostada:' in linea:
+                                                    valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                elif 'Probabilidad histórica:' in linea:
+                                                    prob_str = re.search(r'(\d+\.?\d*)%', linea)
+                                                    if prob_str:
+                                                        probabilidad = float(prob_str.group(1)) / 100
+                                            
+                                            analisis_props.append({
+                                                'jugador': jugador,
+                                                'tipo': prop['prop_name'],
+                                                'linea': f">{prop['over_line']}",
+                                                'cuota': prop['over_odds'],
+                                                'probabilidad': probabilidad,
+                                                'valor_esperado': valor_esperado,
+                                                'recomendacion': '✅' if valor_esperado > 0 else '❌'
+                                            })
+                                        except Exception as e:
+                                            st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Over: {str(e)}")
+                                        
+                                    # Analizar under si existe
                                     if prop['under_line'] is not None and prop['under_odds'] is not None:
-                                        odds_data.append({
-                                            'Jugador': jugador,
-                                            'Prop': prop['prop_name'],
-                                            'Línea': prop['under_line'],
-                                            'Tipo': 'Menos de',
-                                            'Cuota': prop['under_odds']
-                                        })
-                            if odds_data:
-                                st.session_state.odds_data_df = pd.DataFrame(odds_data)
-                                st.success("✅ Datos recargados correctamente")
+                                        try:
+                                            resultado = evaluar_prop_bet(
+                                                stats=nba,
+                                                equipo=equipo_sel,
+                                                jugador=nombre_jugador,
+                                                prop=prop['prop_name'],
+                                                umbral=prop['under_line'],
+                                                cuota=prop['under_odds'],
+                                                temporada=temporada_sel,
+                                                tipo_temporada=tipos_temporada_sel,
+                                                es_over=False
+                                            )
+                                            
+                                            # Extraer valor esperado y probabilidad
+                                            valor_esperado = None
+                                            probabilidad = None
+                                            for linea in resultado.split('\n'):
+                                                if 'Valor esperado por unidad apostada:' in linea:
+                                                    valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                elif 'Probabilidad histórica:' in linea:
+                                                    prob_str = re.search(r'(\d+\.?\d*)%', linea)
+                                                    if prob_str:
+                                                        probabilidad = float(prob_str.group(1)) / 100
+                                            
+                                            analisis_props.append({
+                                                'jugador': jugador,
+                                                'tipo': prop['prop_name'],
+                                                'linea': f"<{prop['under_line']}",
+                                                'cuota': prop['under_odds'],
+                                                'probabilidad': probabilidad,
+                                                'valor_esperado': valor_esperado,
+                                                'recomendacion': '✅' if valor_esperado > 0 else '❌'
+                                            })
+                                        except Exception as e:
+                                            st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Under: {str(e)}")
+                                
+                            # Guardar análisis en session state
+                            st.session_state.historial_apuestas = analisis_props
+                            
+                            # Mostrar resumen
+                            if analisis_props:
+                                st.success(f"✅ {len(analisis_props)} props analizadas correctamente")
                             else:
-                                st.warning("⚠️ No se encontraron cuotas en Google Sheets")
+                                st.warning("⚠️ No se encontraron props para analizar")
+                            
                         except Exception as e:
-                            st.error(f"Error al recargar datos: {str(e)}")
+                            st.error(f"Error al cargar/analizar datos: {str(e)}")
                 
-                # Verificar si hay datos cargados
-                if 'odds_data_df' not in st.session_state or st.session_state.odds_data_df.empty:
-                    try:
-                        # Intentar cargar los datos si no existen
-                        if 'odds_data' not in st.session_state:
-                            st.session_state.odds_data = st.session_state.sheets_loader.load_odds()
-                        
-                        # Crear DataFrame para mostrar todas las cuotas
-                        odds_data = []
-                        for jugador, props in st.session_state.odds_data.items():
-                            for prop in props:
-                                # Agregar over si existe
-                                if prop['over_line'] is not None and prop['over_odds'] is not None:
-                                    odds_data.append({
-                                        'Jugador': jugador,
-                                        'Prop': prop['prop_name'],
-                                        'Línea': prop['over_line'],
-                                        'Tipo': 'Más de',
-                                        'Cuota': prop['over_odds']
-                                    })
-                                # Agregar under si existe
-                                if prop['under_line'] is not None and prop['under_odds'] is not None:
-                                    odds_data.append({
-                                        'Jugador': jugador,
-                                        'Prop': prop['prop_name'],
-                                        'Línea': prop['under_line'],
-                                        'Tipo': 'Menos de',
-                                        'Cuota': prop['under_odds']
-                                    })
-                        if odds_data:
-                            st.session_state.odds_data_df = pd.DataFrame(odds_data)
-                    except Exception as e:
-                        st.error(f"Error al cargar datos: {str(e)}")
-                        st.stop()
-                
-                # Mostrar datos si están disponibles
-                if 'odds_data_df' in st.session_state and not st.session_state.odds_data_df.empty:
-                    # Filtros
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        jugadores_disponibles = sorted(st.session_state.odds_data_df['Jugador'].unique())
-                        jugador_filtro = st.selectbox(
-                            "🏃‍♂️ Filtrar por Jugador",
-                            ["Todos"] + jugadores_disponibles,
-                            key="jugador_filtro_odds"
-                        )
+                # Mostrar historial de análisis
+                if 'historial_apuestas' in st.session_state and st.session_state.historial_apuestas:
+                    st.markdown("---")
+                    st.header("📚 Resumen de Props Analizadas")
                     
-                    with col2:
-                        props_disponibles = sorted(st.session_state.odds_data_df['Prop'].unique())
-                        prop_filtro = st.selectbox(
-                            "📊 Filtrar por Prop",
-                            ["Todas"] + props_disponibles,
-                            key="prop_filtro_odds"
-                        )
+                    # Crear DataFrame del historial
+                    df_historial = pd.DataFrame(st.session_state.historial_apuestas)
                     
-                    # Aplicar filtros
-                    df_filtrado = st.session_state.odds_data_df.copy()
-                    if jugador_filtro != "Todos":
-                        df_filtrado = df_filtrado[df_filtrado['Jugador'] == jugador_filtro]
-                    if prop_filtro != "Todas":
-                        df_filtrado = df_filtrado[df_filtrado['Prop'] == prop_filtro]
+                    # Ordenar por valor esperado (mejor a peor)
+                    df_historial = df_historial.sort_values('valor_esperado', ascending=False)
                     
-                    # Mostrar tabla de cuotas
-                    st.write("### 📊 Cuotas Disponibles")
+                    # Formatear el valor esperado y la probabilidad
+                    df_historial['valor_esperado'] = df_historial['valor_esperado'].apply(
+                        lambda x: f"{x:+.2f}" if x is not None else "N/A"
+                    )
+                    df_historial['probabilidad'] = df_historial['probabilidad'].apply(
+                        lambda x: f"{x*100:.1f}%" if x is not None else "N/A"
+                    )
+                    
+                    # Mostrar tabla con estilo
                     st.dataframe(
-                        df_filtrado,
+                        df_historial,
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "Jugador": st.column_config.TextColumn(
+                            "jugador": st.column_config.TextColumn(
                                 "Jugador",
-                                width="medium"
+                                width="medium",
+                                help="Nombre del jugador"
                             ),
-                            "Prop": st.column_config.TextColumn(
-                                "Prop",
-                                width="medium"
-                            ),
-                            "Línea": st.column_config.NumberColumn(
-                                "Línea",
-                                format="%.1f"
-                            ),
-                            "Tipo": st.column_config.TextColumn(
+                            "tipo": st.column_config.TextColumn(
                                 "Tipo",
-                                width="small"
+                                width="medium",
+                                help="Tipo de prop"
                             ),
-                            "Cuota": st.column_config.NumberColumn(
+                            "linea": st.column_config.TextColumn(
+                                "Línea",
+                                width="small",
+                                help="Valor de la línea"
+                            ),
+                            "cuota": st.column_config.NumberColumn(
                                 "Cuota",
-                                format="%.2f"
+                                format="%.2f",
+                                help="Cuota ofrecida"
+                            ),
+                            "probabilidad": st.column_config.TextColumn(
+                                "Prob. Hist.",
+                                width="small",
+                                help="Probabilidad histórica"
+                            ),
+                            "valor_esperado": st.column_config.TextColumn(
+                                "Valor Esp.",
+                                width="small",
+                                help="Valor esperado por unidad apostada"
+                            ),
+                            "recomendacion": st.column_config.TextColumn(
+                                "Rec.",
+                                width="small",
+                                help="Recomendación de apuesta"
                             )
                         }
                     )
                     
-                    # Sección de análisis
-                    st.write("### 🎯 Analizar Props")
-                    
-                    # Seleccionar prop para analizar
-                    prop_seleccionada = st.selectbox(
-                        "Seleccionar prop para analizar",
-                        df_filtrado.apply(lambda x: f"{x['Jugador']} - {x['Prop']} {x['Tipo']} {x['Línea']} @ {x['Cuota']}", axis=1).unique(),
-                        key="prop_analizar"
-                    )
-                    
-                    if st.button("📊 Analizar Prop Seleccionada", key="analizar_prop_cargada"):
-                        with st.spinner("Analizando prop..."):
-                            try:
-                                # Obtener detalles de la prop seleccionada
-                                prop_data = df_filtrado[df_filtrado.apply(
-                                    lambda x: f"{x['Jugador']} - {x['Prop']} {x['Tipo']} {x['Línea']} @ {x['Cuota']}", 
-                                    axis=1) == prop_seleccionada].iloc[0]
-                                
-                                # Extraer nombre del jugador (antes de la coma si existe)
-                                nombre_jugador = prop_data['Jugador'].split(',')[0] if ',' in prop_data['Jugador'] else prop_data['Jugador']
-                                
-                                resultado = evaluar_prop_bet(
-                                    stats=nba,
-                                    equipo=equipo_sel,
-                                    jugador=nombre_jugador,
-                                    prop=prop_data['Prop'],
-                                    umbral=prop_data['Línea'],
-                                    cuota=prop_data['Cuota'],
-                                    temporada=temporada_sel,
-                                    tipo_temporada=tipos_temporada_sel,
-                                    es_over=prop_data['Tipo'] == "Más de"
-                                )
-                                
-                                st.code(resultado, language="markdown")
-                                
-                            except Exception as e:
-                                st.error(f"Error al analizar la prop: {str(e)}")
+                    # Botón para limpiar historial
+                    if st.button("🗑️ Limpiar Historial", key='limpiar_historial'):
+                        st.session_state.historial_apuestas = []
+                        st.rerun()
                 else:
-                    st.info("No hay cuotas disponibles. Usa el botón 'Recargar Datos' para intentar cargarlas.")
+                    st.info("No hay props analizadas. Usa el botón 'Recargar y Analizar Props' para comenzar.")
             
             except Exception as e:
                 st.error(f"Error en la pestaña de apuestas cargadas: {str(e)}")
