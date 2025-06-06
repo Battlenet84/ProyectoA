@@ -139,8 +139,16 @@ def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: floa
         print(f"Error al convertir valores a numéricos: {str(e)}")
         return 0.0, 0, 0
     
-    # Obtener los valores válidos
-    valores = df[columna]
+    # Asegurarnos de que el umbral sea numérico
+    try:
+        umbral = float(umbral)
+    except (TypeError, ValueError):
+        print(f"Error: El umbral {umbral} no es un número válido")
+        return 0.0, 0, 0
+    
+    # Obtener los valores válidos y asegurarnos de que son números
+    valores = pd.to_numeric(df[columna], errors='coerce')
+    valores = valores.dropna()
     
     # Verificar que tenemos datos
     total_partidos = len(valores)
@@ -158,7 +166,7 @@ def calcular_probabilidad_historica(df: pd.DataFrame, columna: str, umbral: floa
         print(f"Error al comparar valores: {str(e)}")
         return 0.0, 0, 0
     
-    probabilidad = veces_cumplido / total_partidos
+    probabilidad = veces_cumplido / total_partidos if total_partidos > 0 else 0.0
     
     # Mostrar datos históricos
     print(f"\nDatos históricos ({filtro_local}):")

@@ -780,13 +780,17 @@ if equipo_sel:
                                     # Analizar over si existe
                                     if prop['over_line'] is not None and prop['over_odds'] is not None:
                                         try:
+                                            # Asegurarnos de que los valores sean numéricos
+                                            over_line = float(prop['over_line'])
+                                            over_odds = float(prop['over_odds'])
+                                            
                                             resultado = evaluar_prop_bet(
                                                 stats=nba,
                                                 equipo=equipo_sel,
                                                 jugador=nombre_jugador,
                                                 prop=prop['prop_name'],
-                                                umbral=prop['over_line'],
-                                                cuota=prop['over_odds'],
+                                                umbral=over_line,
+                                                cuota=over_odds,
                                                 temporada=temporada_sel,
                                                 tipo_temporada=tipos_temporada_sel,
                                                 es_over=True
@@ -797,34 +801,45 @@ if equipo_sel:
                                             probabilidad = None
                                             for linea in resultado.split('\n'):
                                                 if 'Valor esperado por unidad apostada:' in linea:
-                                                    valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                    try:
+                                                        valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                    except (AttributeError, ValueError):
+                                                        valor_esperado = None
                                                 elif 'Probabilidad histórica:' in linea:
-                                                    prob_str = re.search(r'(\d+\.?\d*)%', linea)
-                                                    if prob_str:
-                                                        probabilidad = float(prob_str.group(1)) / 100
+                                                    try:
+                                                        prob_str = re.search(r'(\d+\.?\d*)%', linea)
+                                                        if prob_str:
+                                                            probabilidad = float(prob_str.group(1)) / 100
+                                                    except (AttributeError, ValueError):
+                                                        probabilidad = None
                                             
-                                            analisis_props.append({
-                                                'jugador': jugador,
-                                                'tipo': prop['prop_name'],
-                                                'linea': f">{prop['over_line']}",
-                                                'cuota': prop['over_odds'],
-                                                'probabilidad': probabilidad,
-                                                'valor_esperado': valor_esperado,
-                                                'recomendacion': '✅' if valor_esperado > 0 else '❌'
-                                            })
+                                            if valor_esperado is not None:  # Solo agregar si tenemos un valor esperado válido
+                                                analisis_props.append({
+                                                    'jugador': jugador,
+                                                    'tipo': prop['prop_name'],
+                                                    'linea': f">{over_line}",
+                                                    'cuota': over_odds,
+                                                    'probabilidad': probabilidad,
+                                                    'valor_esperado': valor_esperado,
+                                                    'recomendacion': '✅' if valor_esperado > 0 else '❌'
+                                                })
                                         except Exception as e:
                                             st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Over: {str(e)}")
                                         
                                     # Analizar under si existe
                                     if prop['under_line'] is not None and prop['under_odds'] is not None:
                                         try:
+                                            # Asegurarnos de que los valores sean numéricos
+                                            under_line = float(prop['under_line'])
+                                            under_odds = float(prop['under_odds'])
+                                            
                                             resultado = evaluar_prop_bet(
                                                 stats=nba,
                                                 equipo=equipo_sel,
                                                 jugador=nombre_jugador,
                                                 prop=prop['prop_name'],
-                                                umbral=prop['under_line'],
-                                                cuota=prop['under_odds'],
+                                                umbral=under_line,
+                                                cuota=under_odds,
                                                 temporada=temporada_sel,
                                                 tipo_temporada=tipos_temporada_sel,
                                                 es_over=False
@@ -835,21 +850,28 @@ if equipo_sel:
                                             probabilidad = None
                                             for linea in resultado.split('\n'):
                                                 if 'Valor esperado por unidad apostada:' in linea:
-                                                    valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                    try:
+                                                        valor_esperado = float(re.search(r'[-+]?\d*\.\d+', linea).group())
+                                                    except (AttributeError, ValueError):
+                                                        valor_esperado = None
                                                 elif 'Probabilidad histórica:' in linea:
-                                                    prob_str = re.search(r'(\d+\.?\d*)%', linea)
-                                                    if prob_str:
-                                                        probabilidad = float(prob_str.group(1)) / 100
+                                                    try:
+                                                        prob_str = re.search(r'(\d+\.?\d*)%', linea)
+                                                        if prob_str:
+                                                            probabilidad = float(prob_str.group(1)) / 100
+                                                    except (AttributeError, ValueError):
+                                                        probabilidad = None
                                             
-                                            analisis_props.append({
-                                                'jugador': jugador,
-                                                'tipo': prop['prop_name'],
-                                                'linea': f"<{prop['under_line']}",
-                                                'cuota': prop['under_odds'],
-                                                'probabilidad': probabilidad,
-                                                'valor_esperado': valor_esperado,
-                                                'recomendacion': '✅' if valor_esperado > 0 else '❌'
-                                            })
+                                            if valor_esperado is not None:  # Solo agregar si tenemos un valor esperado válido
+                                                analisis_props.append({
+                                                    'jugador': jugador,
+                                                    'tipo': prop['prop_name'],
+                                                    'linea': f"<{under_line}",
+                                                    'cuota': under_odds,
+                                                    'probabilidad': probabilidad,
+                                                    'valor_esperado': valor_esperado,
+                                                    'recomendacion': '✅' if valor_esperado > 0 else '❌'
+                                                })
                                         except Exception as e:
                                             st.warning(f"Error al analizar {jugador} - {prop['prop_name']} Under: {str(e)}")
                                 
